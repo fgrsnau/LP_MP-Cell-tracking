@@ -1,4 +1,5 @@
 SET(SOURCE_FILES
+  my.cpp
   cell_tracking_mother_machine.cpp 
   cell_tracking_with_division_distance.cpp
   cell_tracking.cpp 

@@ -11,7 +11,7 @@
 namespace LP_MP {
 
 struct FMC_CELL_TRACKING {
-  constexpr static char* name = "Cell tracking";
+  constexpr static const char* name = "Cell tracking";
 
   using detection_factor_container = FactorContainer<detection_factor, FMC_CELL_TRACKING, 0, true>;
   using at_most_one_hypothesis_container = FactorContainer<at_most_one_cell_factor, FMC_CELL_TRACKING, 1, false>;
@@ -33,7 +33,7 @@ struct FMC_CELL_TRACKING {
 };
 
 struct FMC_CELL_TRACKING_FLOW {
-  constexpr static char* name = "Cell tracking";
+  constexpr static const char* name = "Cell tracking";
 
   using detection_factor_container = FactorContainer<detection_factor, FMC_CELL_TRACKING_FLOW, 0, true>;
   using at_most_one_hypothesis_container = FactorContainer<at_most_one_cell_factor, FMC_CELL_TRACKING_FLOW, 1, false>;
@@ -55,7 +55,7 @@ struct FMC_CELL_TRACKING_FLOW {
 };
 
 struct FMC_CELL_TRACKING_DUPLICATE_EDGES {
-  constexpr static char* name = "Cell tracking";
+  constexpr static const char* name = "Cell tracking";
 
   using detection_factor_container = FactorContainer<detection_factor, FMC_CELL_TRACKING_DUPLICATE_EDGES, 0, true>;
   using edge_factor_container = FactorContainer<mapping_edge_factor, FMC_CELL_TRACKING_DUPLICATE_EDGES, 1, false>;
@@ -80,7 +80,7 @@ struct FMC_CELL_TRACKING_DUPLICATE_EDGES {
 }; 
 
 struct FMC_CELL_TRACKING_WITH_DIVISION_DISTANCE {
-  constexpr static char* name = "Cell tracking with division distance";
+  constexpr static const char* name = "Cell tracking with division distance";
 
   using detection_factor_container = FactorContainer<detection_factor_dd, FMC_CELL_TRACKING_WITH_DIVISION_DISTANCE, 0, true>;
   using at_most_one_hypothesis_container = FactorContainer<at_most_one_cell_factor, FMC_CELL_TRACKING_WITH_DIVISION_DISTANCE, 1, false>;
@@ -100,7 +100,7 @@ struct FMC_CELL_TRACKING_WITH_DIVISION_DISTANCE {
 };
 
 struct FMC_CELL_TRACKING_DIVISION_DISTANCE_DUPLICATE_EDGES{
-  constexpr static char* name = "Cell tracking with division distance";
+  constexpr static const char* name = "Cell tracking with division distance";
 
   using detection_factor_container = FactorContainer<detection_factor_dd, FMC_CELL_TRACKING_DIVISION_DISTANCE_DUPLICATE_EDGES, 0, true>;
   using mapping_edge_factor_container = FactorContainer<mapping_edge_factor_dd, FMC_CELL_TRACKING_DIVISION_DISTANCE_DUPLICATE_EDGES, 1, false>;
@@ -128,7 +128,7 @@ struct FMC_CELL_TRACKING_DIVISION_DISTANCE_DUPLICATE_EDGES{
 }; 
 
 struct FMC_CELL_TRACKING_MOTHER_MACHINE {
-  constexpr static char* name = "Cell tracking in the mother machine";
+  constexpr static const char* name = "Cell tracking in the mother machine";
 
   using detection_factor_container = FactorContainer<detection_factor, FMC_CELL_TRACKING_MOTHER_MACHINE, 0, true>;
   using at_most_one_hypothesis_container = FactorContainer<at_most_one_cell_factor, FMC_CELL_TRACKING_MOTHER_MACHINE, 1, false>;
@@ -157,7 +157,7 @@ struct FMC_CELL_TRACKING_MOTHER_MACHINE {
 
 
 struct FMC_CELL_TRACKING_FINE_DECOMPOSITION {
-  constexpr static char* name = "Cell tracking fine decomposition";
+  constexpr static const char* name = "Cell tracking fine decomposition";
 
   using incoming_edges_factor = FactorContainer<flow_conservation_factor, FMC_CELL_TRACKING_FINE_DECOMPOSITION, 0, false>;
   using outgoing_edges_factor = FactorContainer<flow_conservation_factor, FMC_CELL_TRACKING_FINE_DECOMPOSITION, 1, false>;

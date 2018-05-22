@@ -5,7 +5,7 @@
 using namespace LP_MP;
 
 int main(int argc, char** argv) {
-Solver<FMC_CELL_TRACKING,LP<FMC_CELL_TRACKING>,StandardVisitor> solver(argc,argv);
-solver.ReadProblem(cell_tracking_parser_2d::ParseProblem<Solver<FMC_CELL_TRACKING,LP<FMC_CELL_TRACKING>,StandardVisitor>>);
+Solver<LP<FMC_CELL_TRACKING>,StandardVisitor> solver(argc,argv);
+solver.ReadProblem(cell_tracking_parser_2d::ParseProblem<decltype(solver)>);
 return solver.Solve();
 }
