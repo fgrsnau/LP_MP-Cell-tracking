@@ -20,9 +20,11 @@ std::string demangled_name(T &object)
 class binary_factor : public std::array<REAL, 2> {
 public:
   binary_factor(REAL cost_on = 0, REAL cost_off = 0)
+  : primal_()
   {
     (*this)[0] = cost_off;
     (*this)[1] = cost_on;
+    // TODO: init_primal()?
   }
 
   REAL LowerBound() const
@@ -46,45 +48,32 @@ public:
 
   void MaximizePotentialAndComputePrimal()
   {
-    if (primal_ >= size()) {
+    if (primal_ >= size())
       primal_ = std::min_element(this->begin(), this->end()) - this->begin();
-    }
   }
 
-  auto export_variables() {
-    if (debug()) {
-      std::cout << demangled_name(*this) << "::export_variables -> 2" << std::endl;
-    }
-    return std::tie((*this)[0], (*this)[1]);
+  auto export_variables() { return std::tie(*static_cast<std::array<REAL, 2>*>(this)); }
+
+  template<typename SOLVER>
+  void construct_constraints(SOLVER& solver, typename SOLVER::vector vars) const
+  {
+    solver.add_simplex_constraint(vars.begin(), vars.end());
   }
 
   template<typename SOLVER>
-  void construct_constraints(SOLVER& solver, typename SOLVER::variable off, typename SOLVER::variable on) const
+  void convert_primal(SOLVER& s, typename SOLVER::vector vars)
   {
-    std::array<typename SOLVER::variable, 2> tmp { off, on };
-    solver.add_simplex_constraint(tmp.begin(), tmp.end());
-  }
-
-  template<typename SOLVER>
-  void convert_primal(SOLVER& s, typename SOLVER::variable off, typename SOLVER::variable on)
-  {
-    if (s.solution(off)) {
-      primal_ = 0;
-    } else {
-      assert(s.solution(on));
-      primal_ = 1;
-    }
+    assert(s.solution(vars[0]) != s.solution(vars[1]));
+    primal_ = s.first_active(vars);
   }
 
   template<typename ARCHIVE>
   void serialize_primal(ARCHIVE& ar) { ar(primal_); }
 
   template<typename ARCHIVE>
-  void serialize_dual(ARCHIVE& ar)
-  {
-    for (REAL x : *this)
-      ar(x);
-  };
+  void serialize_dual(ARCHIVE& ar) { ar(*static_cast<std::array<REAL, 2>*>(this)); };
+
+  INDEX primal() const { return primal_; }
 
 private:
   INDEX primal_;
@@ -122,17 +111,11 @@ public:
     }
   }
 
-  auto export_variables() {
-    if (debug()) {
-      std::cout << demangled_name(*this) << "::export_variables -> " << duals_.size() << std::endl;
-    }
-    return std::tie(duals_);
-  }
+  auto export_variables() { return std::tie(duals_); }
 
   template<typename SOLVER>
   void construct_constraints(SOLVER& solver, typename SOLVER::vector vars) const
   {
-    std::cout << demangled_name(*this) << "::construct_constraints -> " << vars.size() << std::endl;
     assert(duals_.size() == vars.size());
 
     for (auto it = vars.begin(); it != vars.end(); ++it, ++it)
@@ -151,6 +134,13 @@ public:
     for (INDEX i = 0; i < no_binaries_; ++i)
       if (s.solution(vars[dual_idx(i, true)]))
         primal_ = i;
+
+#ifndef NDEBUG
+    for (INDEX i = 0; i < no_binaries_; ++i) {
+      assert(s.solution(vars[dual_idx(i, primal_ == i)]));
+      assert(!s.solution(vars[dual_idx(i, primal_ != i)]));
+    }
+#endif
   }
 
   template<typename ARCHIVE>
@@ -159,6 +149,7 @@ public:
   template<typename ARCHIVE>
   void serialize_dual(ARCHIVE& ar) { ar(duals_); };
 
+  INDEX primal() const { return primal_; }
   const REAL& dual(INDEX binary, bool flag) const { return duals_[dual_idx(binary, flag)]; }
 
 protected:
@@ -339,36 +330,25 @@ public:
     }
   }
 
-  auto export_variables() {
-    if (debug()) {
-      std::cout << demangled_name(*this) << "::export_variables -> 4" << std::endl;
-    }
-    return std::tie(duals_left_[0], duals_left_[1], duals_right_[0], duals_right_[1]);
-  }
+  auto export_variables() { return std::tie(duals_left_, duals_right_); }
 
   template<typename SOLVER>
   void construct_constraints(SOLVER& solver,
-    typename SOLVER::variable var_left_0, typename SOLVER::variable var_left_1,
-    typename SOLVER::variable var_right_0, typename SOLVER::variable var_right_1) const
+    typename SOLVER::vector left_vars, typename SOLVER::vector right_vars) const
   {
-    std::array<typename SOLVER::variable, 2> vars { var_left_0, var_left_1 };
-    solver.add_simplex_constraint(vars.begin(), vars.end());
-
-    vars = { var_right_0, var_right_1 };
-    solver.add_simplex_constraint(vars.begin(), vars.end());
-
-    solver.add_implication(var_left_1, var_right_1);
+    solver.add_simplex_constraint(left_vars.begin(), left_vars.end());
+    solver.add_simplex_constraint(right_vars.begin(), right_vars.end());
+    solver.add_implication(left_vars[1], right_vars[1]);
   }
 
   template<typename SOLVER>
   void convert_primal(SOLVER& s,
-    typename SOLVER::variable var_left_0, typename SOLVER::variable var_left_1,
-    typename SOLVER::variable var_right_0, typename SOLVER::variable var_right_1)
+    typename SOLVER::vector left_vars, typename SOLVER::vector right_vars)
   {
-    assert(s.solution(var_left_0) != s.solution(var_left_1));
-    assert(s.solution(var_right_0) != s.solution(var_right_1));
-    primal_left_ = s.solution(var_left_1) ? 1 : 0;
-    primal_right_ = s.solution(var_right_1) ? 1 : 0;
+    init_primal();
+    primal_left_ = s.first_active(left_vars);
+    primal_right_ = s.first_active(right_vars);
+    assert(!(s.solution(left_vars[1]) && s.solution(right_vars[0])));
   }
 
   template<typename ARCHIVE>
@@ -376,11 +356,11 @@ public:
 
   template<typename ARCHIVE>
   void serialize_dual(ARCHIVE& ar) {
-    ar(duals_left_[0]);
-    ar(duals_left_[1]);
-    ar(duals_right_[0]);
-    ar(duals_right_[1]);
+    ar(duals_left_);
+    ar(duals_right_);
   }
+
+  std::pair<INDEX, INDEX> primal() const { return std::make_pair(primal_left_, primal_right_); }
 
 protected:
   INDEX primal_left_, primal_right_;
@@ -407,6 +387,7 @@ public:
   template<typename RIGHT_FACTOR, typename G2>
   void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
   {
+    assert(binary_idx_ >= 0 && binary_idx_ < r.no_binaries_);
     // FIXME: This omega computation is error-prone.
     msg[0] -= r.dual(binary_idx_, 0) * omega * r.no_binaries_;
     msg[1] -= r.dual(binary_idx_, 1) * omega * r.no_binaries_;
@@ -415,27 +396,33 @@ public:
   template<typename LEFT_FACTOR>
   void RepamLeft(LEFT_FACTOR& l, const REAL msg, const INDEX msg_dim)
   {
+    assert(msg_dim >= 0 && msg_dim < 2);
     l[msg_dim] += msg;
   }
 
   template<typename RIGHT_FACTOR>
   void RepamRight(RIGHT_FACTOR& r, const REAL msg, const INDEX msg_dim)
   {
+    assert(binary_idx_ >= 0 && binary_idx_ < r.no_binaries_);
+    assert(msg_dim >= 0 && msg_dim < 2);
     r.dual(binary_idx_, msg_dim == 1) += msg;
   }
 
   template<typename SOLVER, typename LEFT_FACTOR, typename RIGHT_FACTOR>
   void construct_constraints(SOLVER& s,
-    LEFT_FACTOR& l, typename SOLVER::variable left_off, typename SOLVER::variable left_on,
+    LEFT_FACTOR& l, typename SOLVER::vector left_vars,
     RIGHT_FACTOR& r, typename SOLVER::vector right_vars) const
   {
-    std::cout << demangled_name(*this) << "::construct_constraints -> " << right_vars.size() << std::endl;
-    std::cout << "r.duals_.size() = " << r.duals_.size() << std::endl;
-    std::cout << "right_vars.size() = " << right_vars.size() << std::endl;
-    std::cout << "xxx = " << std::get<0>(r.export_variables()).size() << std::endl;
     assert(r.duals_.size() == right_vars.size());
-    s.make_equal(left_off, right_vars[binary_idx_*2]);
-    s.make_equal(left_on, right_vars[binary_idx_*2+1]);
+    s.make_equal(left_vars[0], right_vars[binary_idx_*2]);
+    s.make_equal(left_vars[1], right_vars[binary_idx_*2+1]);
+  }
+
+  template<typename LEFT_FACTOR, typename RIGHT_FACTOR>
+  bool CheckPrimalConsistency(const LEFT_FACTOR& l, const RIGHT_FACTOR& r) const
+  {
+    assert(binary_idx_ >= 0 && binary_idx_ < r.no_binaries_);
+    return l.primal() == (r.primal() == binary_idx_ ? 1 : 0);
   }
 
 protected:
@@ -458,6 +445,7 @@ public:
   template<typename RIGHT_FACTOR, typename G2>
   void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
   {
+    assert(binary_idx_ >= 0 && binary_idx_ < r.no_binaries_);
     // FIXME: This omega computation is error-prone.
     msg[0] -= r.dual(binary_idx_, 0) * omega * r.no_binaries_;
     msg[1] -= r.dual(binary_idx_, 1) * omega * r.no_binaries_;
@@ -466,12 +454,15 @@ public:
   template<typename LEFT_FACTOR>
   void RepamLeft(LEFT_FACTOR& l, const REAL msg, const INDEX msg_dim)
   {
+    assert(msg_dim >= 0 && msg_dim < 2);
     l[msg_dim] += msg;
   }
 
   template<typename RIGHT_FACTOR>
   void RepamRight(RIGHT_FACTOR& r, const REAL msg, const INDEX msg_dim)
   {
+    assert(msg_dim >= 0 && msg_dim < 2);
+    assert(binary_idx_ >= 0 && binary_idx_ < r.no_binaries_);
     r.dual(binary_idx_, msg_dim == 1) += msg;
     r.minorant(binary_idx_, msg_dim == 1) += msg; // send_message could be called multiple times, so we keep current minorant up to date
   }
@@ -519,16 +510,27 @@ public:
 
   template<typename SOLVER, typename LEFT_FACTOR, typename RIGHT_FACTOR>
   void construct_constraints(SOLVER& s,
-    LEFT_FACTOR& l, typename SOLVER::variable left_off, typename SOLVER::variable left_on,
-    RIGHT_FACTOR& r, typename SOLVER::variable right_left_0, typename SOLVER::variable right_left_1,
-      typename SOLVER::variable right_right_0, typename SOLVER::variable right_right_1) const
+    LEFT_FACTOR& l, typename SOLVER::vector left_vars,
+    RIGHT_FACTOR& r, typename SOLVER::vector right_left_vars, typename SOLVER::vector right_right_vars) const
   {
     if constexpr (CHIRALITY == Chirality::left) {
-      s.make_equal(left_off, right_left_0);
-      s.make_equal(left_on, right_left_1);
+      s.make_equal(left_vars[0], right_left_vars[0]);
+      s.make_equal(left_vars[1], right_left_vars[1]);
     } else {
-      s.make_equal(left_off, right_right_0);
-      s.make_equal(left_on, right_right_1);
+      static_assert(CHIRALITY == Chirality::right);
+      s.make_equal(left_vars[0], right_right_vars[0]);
+      s.make_equal(left_vars[1], right_right_vars[1]);
+    }
+  }
+
+  template<typename LEFT_FACTOR, typename RIGHT_FACTOR>
+  bool CheckPrimalConsistency(const LEFT_FACTOR& l, const RIGHT_FACTOR& r) const
+  {
+    if constexpr (CHIRALITY == Chirality::left) {
+      return l.primal() == r.primal().first;
+    } else {
+      static_assert(CHIRALITY == Chirality::right);
+      return l.primal() == r.primal().second;
     }
   }
 };
@@ -583,6 +585,13 @@ public:
     auto* f_disappearance_implication = lp.template add_factor<implication_factor_container>();
     lp.template add_message<implication_left_message_container>(fs.disappearance, f_disappearance_implication);
     lp.template add_message<implication_right_message_container>(fs.detection, f_disappearance_implication);
+
+#ifndef NDEBUG
+    fs.no_incoming_divisions = no_incoming_division_edges;
+    fs.no_incoming_transitions = no_incoming_transition_edges;
+    fs.no_outgoing_divisions = no_outgoing_division_edges;
+    fs.no_outgoing_transitions = no_outgoing_transition_edges;
+#endif
   }
 
   template<typename LP_TYPE>
@@ -591,8 +600,6 @@ public:
     const INDEX timestep_next, const INDEX next_cell,
     const REAL cost)
   {
-    return; // FIXME: Remove after debugging...
-
     auto& prev_factors = segmentation_infos_[timestep_prev][prev_cell];
     auto& next_factors = segmentation_infos_[timestep_next][next_cell];
 
@@ -617,8 +624,6 @@ public:
     const INDEX timestep_next_2, const INDEX next_cell_2,
     const REAL cost)
   {
-    return; // FIXME: Remove after debugging...
-
     auto& prev_factors = segmentation_infos_[timestep_prev][prev_cell];
     auto& next_factors_1 = segmentation_infos_[timestep_next_1][next_cell_1];
     auto& next_factors_2 = segmentation_infos_[timestep_next_2][next_cell_2];
@@ -659,6 +664,7 @@ public:
       auto* f = segmentation_infos_[timestep][hypothesis_id].detection;
       lp.template add_message<exactly_one_minorant_message_container>(f, f_eq_1, idx++);
     }
+    assert(idx == n);
   }
 
   void begin(LP<FMC>& lp, const std::size_t no_cell_detection_hypotheses, const std::size_t no_transitions, const std::size_t no_divisions)
@@ -669,33 +675,23 @@ public:
   {
     for (auto& timestep : segmentation_infos_) {
       for (auto& segmentation : timestep) {
+        assert(segmentation.incoming_divisions.size() == segmentation.no_incoming_divisions);
+        assert(segmentation.incoming_transitions.size() == segmentation.no_incoming_transitions);
+        assert(segmentation.outgoing_divisions.size() == segmentation.no_outgoing_divisions);
+        assert(segmentation.outgoing_transitions.size() == segmentation.no_outgoing_transitions);
+
         // All incoming appearances, transitions, division + 1 dummy must sum up to 1.
         INDEX idx = 0, size = 2 + segmentation.incoming_transitions.size() + segmentation.incoming_divisions.size();
         auto* f_dummy_in = lp.template add_factor<binary_factor_container>();
         auto* f_in_eq_1 = lp.template add_factor<exactly_one_minorant_factor_container>(size);
         lp.template add_message<exactly_one_minorant_message_container>(f_dummy_in, f_in_eq_1, idx++);
-        lp.template add_message<exactly_one_minorant_message_container>(segmentation.detection, f_in_eq_1, idx++);
+        lp.template add_message<exactly_one_minorant_message_container>(segmentation.appearance, f_in_eq_1, idx++);
         for (auto* f : segmentation.incoming_transitions)
           lp.template add_message<exactly_one_minorant_message_container>(f, f_in_eq_1, idx++);
         for (auto* f : segmentation.incoming_divisions)
           lp.template add_message<exactly_one_minorant_message_container>(f, f_in_eq_1, idx++);
         assert(idx == size);
 
-        //
-        // FIXME: Somehow this code above triggers some nasty bug:
-        //
-        // my: /home/stefan/LP_MP-Cell-tracking/src/my.cpp:482:
-        // void LP_MP::exactly_one_minorant_message::construct_constraints(SOLVER&, LEFT_FACTOR&, typename SOLVER::variable, typename SOLVER::variable, RIGHT_FACTOR&, typename SOLVER::vector) const
-        // [with SOLVER = DD_ILP::external_solver_interface<DD_ILP::gurobi_interface>; LEFT_FACTOR = LP_MP::binary_factor; RIGHT_FACTOR = LP_MP::exactly_one_minorant_factor; typename SOLVER::variable = GRBVar; typename SOLVER::vector = DD_ILP::gurobi_interface::gurobi_variable_vector]:
-        // Assertion `r.duals_.size() == right_vars.size()' failed.
-        //
-        // What the heck is going on?
-        //
-
-
-        // TODO: All the other constraints...
-
-        /*
         // Incoming dummy + segmenation must sum up to 1.
         auto f_dummy_in_eq_1 = lp.template add_factor<exactly_one_factor_container>(2);
         lp.template add_message<exactly_one_message_container>(f_dummy_in, f_dummy_in_eq_1, 0);
@@ -703,22 +699,33 @@ public:
 
         // All outgoing disappearances, transitions, division + 1 dummy must sum up to 1.
         idx = 0;
+        size = 2 + segmentation.outgoing_transitions.size() + segmentation.outgoing_divisions.size();
         auto* f_dummy_out = lp.template add_factor<binary_factor_container>();
-        auto* f_out_eq_1 = lp.template add_factor<exactly_one_factor_container>(2 + segmentation.incoming_transitions.size() + segmentation.incoming_divisions.size());
+        auto* f_out_eq_1 = lp.template add_factor<exactly_one_factor_container>(size);
         lp.template add_message<exactly_one_message_container>(f_dummy_out, f_out_eq_1, idx++);
-        lp.template add_message<exactly_one_message_container>(f_dummy_out, f_out_eq_1, idx++);
+        lp.template add_message<exactly_one_message_container>(segmentation.disappearance, f_out_eq_1, idx++);
         for (auto* f : segmentation.outgoing_transitions)
           lp.template add_message<exactly_one_message_container>(f, f_out_eq_1, idx++);
         for (auto* f : segmentation.outgoing_divisions)
           lp.template add_message<exactly_one_message_container>(f, f_out_eq_1, idx++);
+        assert(idx == size);
 
         // Outgoing dummy + segmenation must sum up to 1.
         auto f_dummy_out_eq_1 = lp.template add_factor<exactly_one_factor_container>(2);
         lp.template add_message<exactly_one_message_container>(f_dummy_out, f_dummy_out_eq_1, 0);
         lp.template add_message<exactly_one_message_container>(segmentation.detection, f_dummy_out_eq_1, 1);
-        */
+      }
+    }
+  }
 
-        // FIXME: Somehow we have to link the dummy factors to the respective segemantion.
+  void debug() const
+  {
+    int timestep_idx = 0;
+    for (const auto& timestep : segmentation_infos_) {
+      std::cout << std::endl << ":: Timestep " << timestep_idx++ << std::endl << std::endl;
+      int segmentation_idx = 0;
+      for (const auto& segmentation : timestep) {
+        std::cout << "segmentation " << segmentation_idx++ << ": " << segmentation.detection->GetFactor()->primal() << std::endl;
       }
     }
   }
@@ -735,6 +742,10 @@ protected:
     std::vector<binary_factor_container*> incoming_divisions;
     std::vector<binary_factor_container*> outgoing_transitions;
     std::vector<binary_factor_container*> outgoing_divisions;
+
+#ifndef NDEBUG
+    INDEX no_incoming_transitions, no_incoming_divisions, no_outgoing_transitions, no_outgoing_divisions;
+#endif
   };
   using segmentation_info_storage = std::vector<std::vector<segmentation_info>>;
   segmentation_info_storage segmentation_infos_;
@@ -779,66 +790,33 @@ int main(int argc, char** argv) {
   MpRoundingSolver<BaseSolver> solver(argc, argv);
   solver.ReadProblem(cell_tracking_parser_2d::ParseProblem<BaseSolver>);
   solver.Solve();
-#else
+#elif 1
   using BaseSolver = Solver<LP_external_solver<DD_ILP::gurobi_interface, LP<FMC_MY>>, StandardVisitor>;
   BaseSolver solver(argc, argv);
   solver.ReadProblem(cell_tracking_parser_2d::ParseProblem<BaseSolver>);
   solver.GetLP().write_to_file("/tmp/my.lp");
   solver.GetLP().solve();
-#endif
 
-  /*
+  solver.GetProblemConstructor<0>().debug();
+#else
+  using BaseSolver = Solver<LP_external_solver<DD_ILP::gurobi_interface, LP<FMC_MY>>, StandardVisitor>;
+  BaseSolver solver(argc, argv);
   auto& lp = solver.GetLP();
 
-  auto* b0 = lp.template add_factor<FMC_MY::binary_factor_container>();
-  b0->GetFactor()->operator[](0) = 0; b0->GetFactor()->operator[](1) = 00;
-  auto* b1 = lp.template add_factor<FMC_MY::binary_factor_container>();
-  b1->GetFactor()->operator[](0) = 0; b1->GetFactor()->operator[](1) = 10;
-  auto* b2 = lp.template add_factor<FMC_MY::binary_factor_container>();
-  b2->GetFactor()->operator[](0) = 0; b2->GetFactor()->operator[](1) = 20;
+  auto* f0 = lp.template add_factor<FMC_MY::binary_factor_container>(0);
+  auto* f1 = lp.template add_factor<FMC_MY::binary_factor_container>(10);
+  auto* f2 = lp.template add_factor<FMC_MY::exactly_one_minorant_factor_container>(2);
+  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f0, f2, 0);
+  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f1, f2, 1);
 
-  auto* e0 = lp.template add_factor<FMC_MY::exactly_one_factor_container>(3);
+  auto* f3 = lp.template add_factor<FMC_MY::binary_factor_container>(20);
+  auto* f4 = lp.template add_factor<FMC_MY::binary_factor_container>(30);
+  auto* f5 = lp.template add_factor<FMC_MY::binary_factor_container>(40);
+  auto* f6 = lp.template add_factor<FMC_MY::exactly_one_minorant_factor_container>(3);
+  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f3, f6, 0);
+  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f4, f6, 1);
+  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f5, f6, 2);
 
-  auto* m0 = lp.template add_message<FMC_MY::exactly_one_binary_message_container>(b0, e0, 0);
-  auto* m1 = lp.template add_message<FMC_MY::exactly_one_binary_message_container>(b1, e0, 1);
-  auto* m2 = lp.template add_message<FMC_MY::exactly_one_binary_message_container>(b2, e0, 2);
-
-  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
-
-  lp.AddFactorRelation(b0, e0);
-  lp.AddFactorRelation(b1, e0);
-  lp.AddFactorRelation(b2, e0);
-  */
-
-
-  /*
-  std::cout << "Forward pass" << std::endl;
-  lp.ComputeForwardPass();
-  std::cout << "Backward pass" << std::endl;
-  lp.ComputeBackwardPass();
-  */
-
-  /*
-  std::cout << b0->GetFactor()->operator[](0) << " "
-            << b0->GetFactor()->operator[](1) << " "
-            << b1->GetFactor()->operator[](0) << " "
-            << b1->GetFactor()->operator[](1) << " "
-            << b2->GetFactor()->operator[](0) << " "
-            << b2->GetFactor()->operator[](1) << std::endl;
-  */
-
-  /*
-  std::cout << const_cast<const exactly_one_factor*>(e0->GetFactor())->dual(0, 0) << " "
-            << const_cast<const exactly_one_factor*>(e0->GetFactor())->dual(0, 1) << " "
-            << const_cast<const exactly_one_factor*>(e0->GetFactor())->dual(1, 0) << " "
-            << const_cast<const exactly_one_factor*>(e0->GetFactor())->dual(1, 1) << " "
-            << const_cast<const exactly_one_factor*>(e0->GetFactor())->dual(2, 0) << " "
-            << const_cast<const exactly_one_factor*>(e0->GetFactor())->dual(2, 1) << std::endl;
-  */
-
-
-  /*
-  solver.GetLP().write_to_file("output.lp");
   solver.GetLP().solve();
-  */
+#endif
 }
