@@ -6,6 +6,8 @@
 
 namespace LP_MP {
 
+template<typename CHECK> struct get_type;
+
 template<class T>
 std::string demangled_name(T &object)
 {
@@ -575,6 +577,8 @@ public:
   }
 };
 
+enum class graph_direction { forward, backward };
+
 template<typename FMC_T>
 class my_tracking_constructor {
 public:
@@ -605,8 +609,10 @@ public:
     const INDEX no_incoming_transition_edges, const INDEX no_incoming_division_edges,
     const INDEX no_outgoing_transition_edges, const INDEX no_outgoing_division_edges)
   {
+#if 1
     if (! (timestep >= 0 && timestep <= 1))
       return;
+#endif
 
     assert(timestep < segmentation_infos_.size());
     if (hypothesis_id >= segmentation_infos_[timestep].size())
@@ -646,8 +652,10 @@ public:
     const INDEX timestep_next, const INDEX next_cell,
     const REAL cost)
   {
+#if 1
     if (! (timestep_prev >= 0 && timestep_next <= 1))
       return;
+#endif
 
     auto& prev_factors = segmentation_infos_[timestep_prev][prev_cell];
     auto& next_factors = segmentation_infos_[timestep_next][next_cell];
@@ -677,8 +685,10 @@ public:
     const INDEX timestep_next_2, const INDEX next_cell_2,
     const REAL cost)
   {
+#if 1
     if (! (timestep_prev >= 0 && std::max(timestep_next_1, timestep_next_2) <= 1))
       return;
+#endif
 
     auto& prev_factors = segmentation_infos_[timestep_prev][prev_cell];
     auto& next_factors_1 = segmentation_infos_[timestep_next_1][next_cell_1];
@@ -714,8 +724,10 @@ public:
   void add_exclusion_constraint(LP<FMC>& lp, ITERATOR begin, ITERATOR end) // iterator points to std::array<INDEX,2>
   {
     const INDEX timestep = (*begin)[0];
+#if 1
     if (! (timestep >= 0 && timestep <= 1))
       return;
+#endif
 
     exclusion_infos_.resize(segmentation_infos_.size());
     exclusion_infos_[timestep].emplace_back();
@@ -750,9 +762,6 @@ public:
 
   void end(LP<FMC>& lp)
   {
-    std::vector<FactorTypeAdapter*> prev_outgoing;
-    std::vector<FactorTypeAdapter*> curr_outgoing;
-
     for (auto& timestep : segmentation_infos_) {
       for (auto& segmentation : timestep) {
         /*
@@ -797,26 +806,6 @@ public:
           lp.template add_message<exactly_one_message_container>(segmentation.dummy_outgoing, segmentation.exactly_one_outgoing_additional, 1);
         };
 
-        /*
-        auto incoming_order = [&]() {
-          lp.AddAsymmetricFactorRelation(segmentation.dummy_incoming, segmentation.exactly_one_incoming_additional);
-          lp.AddAsymmetricFactorRelation(segmentation.exactly_one_incoming_additional, segmentation.detection);
-
-          segmentation.for_each_incoming([&](auto* binary, auto* connector) {
-            lp.AddAsymmetricFactorRelation(binary, segmentation.exactly_one_incoming);
-          });
-        };
-
-        auto outgoing_order = [&]() {
-          lp.AddAsymmetricFactorRelation(segmentation.detection, segmentation.exactly_one_outgoing_additional);
-          lp.AddAsymmetricFactorRelation(segmentation.exactly_one_outgoing_additional, segmentation.dummy_outgoing);
-
-          segmentation.for_each_outgoing([&](auto* binary, auto* connector) {
-            lp.AddAsymmetricFactorRelation(binary, segmentation.exactly_one_outgoing);
-          });
-        };
-        */
-
         auto order = [&]() {
           lp.AddFactorRelation(segmentation.dummy_incoming, segmentation.exactly_one_incoming_additional);
           lp.AddFactorRelation(segmentation.exactly_one_incoming_additional, segmentation.detection);
@@ -830,32 +819,12 @@ public:
             lp.AddFactorRelation(segmentation.exactly_one_outgoing, binary);
             lp.AddFactorRelation(connector, segmentation.exactly_one_outgoing);
           });
-        /*
-          segmentation.for_each_incoming([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
-            if (connector != segmentation.exactly_one_incoming_additional)
-              lp.AddFactorRelation(connector, segmentation.exactly_one_incoming_additional);
-            lp.AddFactorRelation(binary, connector);
-            lp.AddFactorRelation(connector, segmentation.detection);
-          });
-
-          segmentation.for_each_outgoing([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
-            if (connector != segmentation.exactly_one_outgoing_additional)
-              lp.AddFactorRelation(connector, segmentation.exactly_one_outgoing_additional);
-            lp.AddFactorRelation(segmentation.detection, connector);
-            lp.AddFactorRelation(connector, binary);
-          });
-          */
         };
 
         incoming_uniqueness();
         outgoing_uniqueness();
         order();
-
-        // incoming_order();
-        // outgoing_order();
       }
-
-      std::swap(prev_outgoing, curr_outgoing);
     }
 
     for (auto& timestep : exclusion_infos_) {
@@ -867,11 +836,6 @@ public:
             lp.AddFactorRelation(connector, exclusion.exactly_one);
             lp.AddFactorRelation(exclusion.exactly_one, segmentation.detection);
           });
-          /*
-          segmentation.for_each_outgoing([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
-            lp.AddFactorRelation(exclusion.exactly_one, connector);
-          });
-          */
         }
       }
     }
@@ -899,9 +863,42 @@ public:
     }
   }
 
+  template<graph_direction DIRECTION = graph_direction::forward>
   void output_graphviz(LP<FMC>& lp, const std::string& filename)
   {
     const auto& omega = lp.get_omega();
+
+    //
+    // Useless template metaprogramming shizzle.
+    //
+
+    auto get_update_ordering = [&lp]()constexpr -> auto& {
+      if constexpr (DIRECTION == graph_direction::forward)
+        return lp.forwardUpdateOrdering_;
+      else
+        return lp.backwardUpdateOrdering_;
+    };
+
+    auto get_ordering = [&lp]() constexpr -> auto& {
+      if constexpr (DIRECTION == graph_direction::forward)
+        return lp.forwardOrdering_;
+      else
+        return lp.backwardOrdering_;
+    };
+
+    auto get_omega_send = [&omega]() constexpr -> auto& {
+      if constexpr (DIRECTION == graph_direction::forward)
+        return omega.forward;
+      else
+        return omega.backward;
+    };
+
+    auto get_omega_recv = [&omega]() constexpr -> auto&{
+      if constexpr (DIRECTION == graph_direction::forward)
+        return omega.receive_mask_forward;
+      else
+        return omega.receive_mask_backward;
+    };
 
     //
     // Extract intrinsicts out of LP class.
@@ -914,17 +911,17 @@ public:
     }
 
     int i = 0;
-    std::map<const FactorTypeAdapter*, INDEX> forward_update_index;
-    for (const auto* f : lp.forwardUpdateOrdering_) {
-      assert(forward_update_index.find(f) == forward_update_index.end());
-      forward_update_index.insert(std::make_pair(f, i++));
+    std::map<const FactorTypeAdapter*, INDEX> update_index;
+    for (const auto* f : get_update_ordering()) {
+      assert(update_index.find(f) == update_index.end());
+      update_index.insert(std::make_pair(f, i++));
     }
 
     i = 0;
-    std::map<const FactorTypeAdapter*, INDEX> forward_index;
-    for (const auto* f : lp.forwardOrdering_) {
-      assert(forward_index.find(f) == forward_index.end());
-      forward_index.insert(std::make_pair(f, i++));
+    std::map<const FactorTypeAdapter*, INDEX> ordered_index;
+    for (const auto* f : get_ordering()) {
+      assert(ordered_index.find(f) == ordered_index.end());
+      ordered_index.insert(std::make_pair(f, i++));
     }
 
     //
@@ -940,10 +937,10 @@ public:
     auto tooltip = [&](auto* f) {
       std::stringstream s;
 
-      auto it = forward_update_index.find(f);
-      if (it != forward_update_index.end())
-        s << "s_fw=" << print_container(omega.forward[it->second]) << "\\n"
-          << "r_fw=" << print_container(omega.receive_mask_forward[it->second]);
+      auto it = update_index.find(f);
+      if (it != update_index.end())
+        s << "s_fw=" << print_container(get_omega_send()[it->second]) << "\\n"
+          << "r_fw=" << print_container(get_omega_recv()[it->second]);
 
       return s.str();
     };
@@ -952,8 +949,8 @@ public:
       std::stringstream s;
       s << f_name(f) << " [label=\"";
 
-      auto it = forward_update_index.find(f);
-      if (it != forward_update_index.end())
+      auto it = update_index.find(f);
+      if (it != update_index.end())
         s << "[" << it->second << "]\\n";
 
       s << label << "\",tooltip=\"" << tooltip(f) << "\"];\n";
@@ -976,7 +973,7 @@ public:
       if (!found)
         return 0.0;
 
-      return omega.forward[forward_update_index.at(f_left)][idx];
+      return get_omega_send()[update_index.at(f_left)][idx];
     };
 
     auto get_r_fw = [&](FactorTypeAdapter* f_left, FactorTypeAdapter* f_right) {
@@ -995,7 +992,7 @@ public:
       if (!found)
         return 0;
 
-      return omega.receive_mask_forward[forward_update_index.at(f_right)][idx];
+      return get_omega_recv()[update_index.at(f_right)][idx];
     };
 
     auto format_edge = [&](FactorTypeAdapter* f_left, FactorTypeAdapter* f_right) {
@@ -1087,7 +1084,7 @@ public:
         FactorTypeAdapter* f_left = msg->GetLeftFactor();
         FactorTypeAdapter* f_right = msg->GetRightFactor();
 
-        if (forward_index.at(f_left) > forward_index.at(f_right))
+        if (ordered_index.at(f_left) > ordered_index.at(f_right))
           std::swap(f_left, f_right);
 
         o << format_edge(f_left, f_right);
@@ -1212,8 +1209,7 @@ int main(int argc, char** argv) {
 
   auto& lp = solver.GetLP();
   lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
-  //solver.GetProblemConstructor<0>().debug_omega(lp);
-  solver.GetProblemConstructor<0>().output_graphviz(lp, "debug.dot");
+  solver.GetProblemConstructor<0>().output_graphviz<graph_direction::backward>(lp, "debug.dot");
 #elif 0
   using BaseSolver = Solver<LP_external_solver<DD_ILP::gurobi_interface, LP<FMC_MY>>, StandardVisitor>;
   BaseSolver solver(argc, argv);
