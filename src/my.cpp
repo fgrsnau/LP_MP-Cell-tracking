@@ -1,3 +1,4 @@
+#include <utility>
 #include "cell_tracking.h"
 #include "visitors/standard_visitor.hxx"
 #include "LP_external_interface.hxx"
@@ -15,6 +16,45 @@ std::string demangled_name(T &object)
   std::string result(demangled);
   free(demangled);
   return result;
+}
+
+template<typename ITERATOR>
+struct print_iterator_helper
+{
+  print_iterator_helper(ITERATOR begin, ITERATOR end)
+  : begin(begin)
+  , end(end)
+  { }
+
+  ITERATOR begin;
+  ITERATOR end;
+};
+
+template<typename ITERATOR>
+print_iterator_helper<ITERATOR> print_iterator(ITERATOR begin, ITERATOR end)
+{
+  return print_iterator_helper<ITERATOR>(begin, end);
+}
+
+template<typename ITERATOR>
+std::ostream& operator<<(std::ostream& o, const print_iterator_helper<ITERATOR> &pi)
+{
+  bool first = true;
+  o << "[";
+  for (ITERATOR it = pi.begin; it != pi.end; ++it) {
+    if (!first)
+      o << ", ";
+    o << *it;
+    first = false;
+  }
+  o << "]";
+  return o;
+}
+
+template<typename CONTAINER>
+auto print_container(const CONTAINER& c)
+{
+  return print_iterator(c.begin(), c.end());
 }
 
 class binary_factor : public std::array<REAL, 2> {
@@ -152,7 +192,7 @@ public:
   INDEX primal() const { return primal_; }
   const REAL& dual(INDEX binary, bool flag) const { return duals_[dual_idx(binary, flag)]; }
 
-protected:
+//protected:
   INDEX dual_idx(INDEX binary, bool flag) const
   {
     assert(binary >= 0); assert(binary < no_binaries_);
@@ -559,13 +599,15 @@ public:
     segmentation_infos_.resize(t);
   }
 
-  template<typename LP_TYPE>
-  void add_detection_hypothesis(LP_TYPE& lp,
+  void add_detection_hypothesis(LP<FMC>& lp,
     const INDEX timestep, const INDEX hypothesis_id,
     const REAL detection_cost, const REAL appearance_cost, const REAL disappearance_cost,
     const INDEX no_incoming_transition_edges, const INDEX no_incoming_division_edges,
     const INDEX no_outgoing_transition_edges, const INDEX no_outgoing_division_edges)
   {
+    if (! (timestep >= 0 && timestep <= 1))
+      return;
+
     assert(timestep < segmentation_infos_.size());
     if (hypothesis_id >= segmentation_infos_[timestep].size())
       segmentation_infos_[timestep].resize(hypothesis_id+1);
@@ -575,16 +617,21 @@ public:
 
     auto& fs = segmentation_infos_[timestep][hypothesis_id];
     fs.detection = lp.template add_factor<binary_factor_container>(detection_cost);
-    fs.appearance = lp.template add_factor<binary_factor_container>(appearance_cost);
-    fs.disappearance = lp.template add_factor<binary_factor_container>(disappearance_cost);
+    fs.appearance.binary = lp.template add_factor<binary_factor_container>(appearance_cost);
+    fs.disappearance.binary = lp.template add_factor<binary_factor_container>(disappearance_cost);
 
-    auto* f_appearance_implication = lp.template add_factor<implication_factor_container>();
-    lp.template add_message<implication_left_message_container>(fs.appearance, f_appearance_implication);
-    lp.template add_message<implication_right_message_container>(fs.detection, f_appearance_implication);
+    fs.appearance.implication = lp.template add_factor<implication_factor_container>();
+    lp.template add_message<implication_left_message_container>(fs.appearance.binary, fs.appearance.implication);
+    lp.template add_message<implication_right_message_container>(fs.detection, fs.appearance.implication);
 
-    auto* f_disappearance_implication = lp.template add_factor<implication_factor_container>();
-    lp.template add_message<implication_left_message_container>(fs.disappearance, f_disappearance_implication);
-    lp.template add_message<implication_right_message_container>(fs.detection, f_disappearance_implication);
+    fs.disappearance.implication = lp.template add_factor<implication_factor_container>();
+    lp.template add_message<implication_left_message_container>(fs.disappearance.binary, fs.disappearance.implication);
+    lp.template add_message<implication_right_message_container>(fs.detection, fs.disappearance.implication);
+
+    lp.AddFactorRelation(fs.appearance.binary, fs.appearance.implication);
+    lp.AddFactorRelation(fs.appearance.implication, fs.detection);
+    lp.AddFactorRelation(fs.detection, fs.disappearance.implication);
+    lp.AddFactorRelation(fs.disappearance.implication, fs.disappearance.binary);
 
 #ifndef NDEBUG
     fs.no_incoming_divisions = no_incoming_division_edges;
@@ -594,12 +641,14 @@ public:
 #endif
   }
 
-  template<typename LP_TYPE>
-  void add_cell_transition(LP_TYPE& lp,
+  void add_cell_transition(LP<FMC>& lp,
     const INDEX timestep_prev, const INDEX prev_cell,
     const INDEX timestep_next, const INDEX next_cell,
     const REAL cost)
   {
+    if (! (timestep_prev >= 0 && timestep_next <= 1))
+      return;
+
     auto& prev_factors = segmentation_infos_[timestep_prev][prev_cell];
     auto& next_factors = segmentation_infos_[timestep_next][next_cell];
 
@@ -613,58 +662,86 @@ public:
     lp.template add_message<implication_left_message_container>(f_transition, f_right_implication);
     lp.template add_message<implication_right_message_container>(next_factors.detection, f_right_implication);
 
-    prev_factors.outgoing_transitions.push_back(f_transition);
-    next_factors.incoming_transitions.push_back(f_transition);
+    prev_factors.outgoing_transitions.emplace_back(f_transition, f_left_implication);
+    next_factors.incoming_transitions.emplace_back(f_transition, f_right_implication);
+
+    lp.AddFactorRelation(prev_factors.detection, f_left_implication);
+    lp.AddFactorRelation(f_left_implication, f_transition);
+    lp.AddFactorRelation(f_transition, f_right_implication);
+    lp.AddFactorRelation(f_right_implication, next_factors.detection);
   }
 
-  template<typename LP_TYPE>
-  void add_cell_division(LP_TYPE& lp,
+  void add_cell_division(LP<FMC>& lp,
     const INDEX timestep_prev, const INDEX prev_cell,
     const INDEX timestep_next_1, const INDEX next_cell_1,
     const INDEX timestep_next_2, const INDEX next_cell_2,
     const REAL cost)
   {
+    if (! (timestep_prev >= 0 && std::max(timestep_next_1, timestep_next_2) <= 1))
+      return;
+
     auto& prev_factors = segmentation_infos_[timestep_prev][prev_cell];
     auto& next_factors_1 = segmentation_infos_[timestep_next_1][next_cell_1];
     auto& next_factors_2 = segmentation_infos_[timestep_next_2][next_cell_2];
 
     auto* f_division = lp.template add_factor<binary_factor_container>(cost);
-    auto* f_left_implication = lp.template add_factor<implication_factor_container>();
-    auto* f_right_implication_1 = lp.template add_factor<implication_factor_container>();
-    auto* f_right_implication_2 = lp.template add_factor<implication_factor_container>();
 
+    auto* f_left_implication = lp.template add_factor<implication_factor_container>();
     lp.template add_message<implication_left_message_container>(f_division, f_left_implication);
     lp.template add_message<implication_right_message_container>(prev_factors.detection, f_left_implication);
 
+    auto* f_right_implication_1 = lp.template add_factor<implication_factor_container>();
     lp.template add_message<implication_left_message_container>(f_division, f_right_implication_1);
     lp.template add_message<implication_right_message_container>(next_factors_1.detection, f_right_implication_1);
 
+    auto* f_right_implication_2 = lp.template add_factor<implication_factor_container>();
     lp.template add_message<implication_left_message_container>(f_division, f_right_implication_2);
     lp.template add_message<implication_right_message_container>(next_factors_2.detection, f_right_implication_2);
 
-    prev_factors.outgoing_divisions.push_back(f_division);
-    next_factors_1.incoming_divisions.push_back(f_division);
-    next_factors_2.incoming_divisions.push_back(f_division);
+    prev_factors.outgoing_divisions.emplace_back(f_division, f_left_implication);
+    next_factors_1.incoming_divisions.emplace_back(f_division, f_right_implication_1);
+    next_factors_2.incoming_divisions.emplace_back(f_division, f_right_implication_2);
+
+    lp.AddFactorRelation(prev_factors.detection, f_left_implication);
+    lp.AddFactorRelation(f_left_implication, f_division);
+    lp.AddFactorRelation(f_division, f_right_implication_1);
+    lp.AddFactorRelation(f_right_implication_1, next_factors_1.detection);
+    lp.AddFactorRelation(f_division, f_right_implication_2);
+    lp.AddFactorRelation(f_right_implication_2, next_factors_2.detection);
   }
 
-  template<typename LP_TYPE, typename ITERATOR>
-  void add_exclusion_constraint(LP_TYPE& lp, ITERATOR begin, ITERATOR end) // iterator points to std::array<INDEX,2>
+  template<typename ITERATOR>
+  void add_exclusion_constraint(LP<FMC>& lp, ITERATOR begin, ITERATOR end) // iterator points to std::array<INDEX,2>
   {
-    auto* f_dummy = lp.template add_factor<binary_factor_container>();
-    const INDEX n = std::distance(begin, end) + 1;
     const INDEX timestep = (*begin)[0];
+    if (! (timestep >= 0 && timestep <= 1))
+      return;
 
-    auto* f_eq_1 = lp.template add_factor<exactly_one_minorant_factor_container>(n);
+    exclusion_infos_.resize(segmentation_infos_.size());
+    exclusion_infos_[timestep].emplace_back();
+    auto& exclusion = exclusion_infos_[timestep].back();
+
+    const INDEX n = std::distance(begin, end) + 1;
+    exclusion.dummy = lp.template add_factor<binary_factor_container>();
+    exclusion.exactly_one = lp.template add_factor<exactly_one_minorant_factor_container>(n);
 
     INDEX idx = 0;
-    lp.template add_message<exactly_one_minorant_message_container>(f_dummy, f_eq_1, idx++);
+    lp.template add_message<exactly_one_minorant_message_container>(exclusion.dummy, exclusion.exactly_one, idx++);
     for (auto it = begin; it != end; ++it) {
       assert(timestep == (*it)[0]);
       const INDEX hypothesis_id = (*it)[1];
+
       auto* f = segmentation_infos_[timestep][hypothesis_id].detection;
-      lp.template add_message<exactly_one_minorant_message_container>(f, f_eq_1, idx++);
+      lp.template add_message<exactly_one_minorant_message_container>(f, exclusion.exactly_one, idx++);
+      exclusion.segmentations.push_back(std::make_tuple(timestep, hypothesis_id));
     }
     assert(idx == n);
+
+    lp.AddFactorRelation(exclusion.exactly_one, exclusion.dummy);
+    for (auto s : exclusion.segmentations) {
+      auto* f = segmentation_infos_[std::get<0>(s)][std::get<1>(s)].detection;
+      lp.AddFactorRelation(exclusion.exactly_one, f);
+    }
   }
 
   void begin(LP<FMC>& lp, const std::size_t no_cell_detection_hypotheses, const std::size_t no_transitions, const std::size_t no_divisions)
@@ -673,47 +750,139 @@ public:
 
   void end(LP<FMC>& lp)
   {
+    std::vector<FactorTypeAdapter*> prev_outgoing;
+    std::vector<FactorTypeAdapter*> curr_outgoing;
+
     for (auto& timestep : segmentation_infos_) {
       for (auto& segmentation : timestep) {
+        /*
+         * FIXME: Comment in again.
         assert(segmentation.incoming_divisions.size() == segmentation.no_incoming_divisions);
         assert(segmentation.incoming_transitions.size() == segmentation.no_incoming_transitions);
         assert(segmentation.outgoing_divisions.size() == segmentation.no_outgoing_divisions);
         assert(segmentation.outgoing_transitions.size() == segmentation.no_outgoing_transitions);
+        */
 
-        // All incoming appearances, transitions, division + 1 dummy must sum up to 1.
-        INDEX idx = 0, size = 2 + segmentation.incoming_transitions.size() + segmentation.incoming_divisions.size();
-        auto* f_dummy_in = lp.template add_factor<binary_factor_container>();
-        auto* f_in_eq_1 = lp.template add_factor<exactly_one_minorant_factor_container>(size);
-        lp.template add_message<exactly_one_minorant_message_container>(f_dummy_in, f_in_eq_1, idx++);
-        lp.template add_message<exactly_one_minorant_message_container>(segmentation.appearance, f_in_eq_1, idx++);
-        for (auto* f : segmentation.incoming_transitions)
-          lp.template add_message<exactly_one_minorant_message_container>(f, f_in_eq_1, idx++);
-        for (auto* f : segmentation.incoming_divisions)
-          lp.template add_message<exactly_one_minorant_message_container>(f, f_in_eq_1, idx++);
-        assert(idx == size);
+        auto incoming_uniqueness = [&]() {
+          INDEX size = 2 + segmentation.incoming_transitions.size() + segmentation.incoming_divisions.size();
 
-        // Incoming dummy + segmenation must sum up to 1.
-        auto f_dummy_in_eq_1 = lp.template add_factor<exactly_one_factor_container>(2);
-        lp.template add_message<exactly_one_message_container>(f_dummy_in, f_dummy_in_eq_1, 0);
-        lp.template add_message<exactly_one_message_container>(segmentation.detection, f_dummy_in_eq_1, 1);
+          segmentation.dummy_incoming = lp.template add_factor<binary_factor_container>();
+          segmentation.exactly_one_incoming = lp.template add_factor<exactly_one_minorant_factor_container>(size);
 
-        // All outgoing disappearances, transitions, division + 1 dummy must sum up to 1.
-        idx = 0;
-        size = 2 + segmentation.outgoing_transitions.size() + segmentation.outgoing_divisions.size();
-        auto* f_dummy_out = lp.template add_factor<binary_factor_container>();
-        auto* f_out_eq_1 = lp.template add_factor<exactly_one_factor_container>(size);
-        lp.template add_message<exactly_one_message_container>(f_dummy_out, f_out_eq_1, idx++);
-        lp.template add_message<exactly_one_message_container>(segmentation.disappearance, f_out_eq_1, idx++);
-        for (auto* f : segmentation.outgoing_transitions)
-          lp.template add_message<exactly_one_message_container>(f, f_out_eq_1, idx++);
-        for (auto* f : segmentation.outgoing_divisions)
-          lp.template add_message<exactly_one_message_container>(f, f_out_eq_1, idx++);
-        assert(idx == size);
+          INDEX idx = 0;
+          segmentation.for_each_incoming([&](auto* binary, auto* _) {
+            lp.template add_message<exactly_one_minorant_message_container>(binary, segmentation.exactly_one_incoming, idx++);
+          });
+          assert(idx == size);
 
-        // Outgoing dummy + segmenation must sum up to 1.
-        auto f_dummy_out_eq_1 = lp.template add_factor<exactly_one_factor_container>(2);
-        lp.template add_message<exactly_one_message_container>(f_dummy_out, f_dummy_out_eq_1, 0);
-        lp.template add_message<exactly_one_message_container>(segmentation.detection, f_dummy_out_eq_1, 1);
+          segmentation.exactly_one_incoming_additional = lp.template add_factor<exactly_one_factor_container>(2);
+          lp.template add_message<exactly_one_message_container>(segmentation.dummy_incoming, segmentation.exactly_one_incoming_additional, 0);
+          lp.template add_message<exactly_one_message_container>(segmentation.detection, segmentation.exactly_one_incoming_additional, 1);
+        };
+
+        auto outgoing_uniqueness = [&]() {
+          INDEX size = 2 + segmentation.outgoing_transitions.size() + segmentation.outgoing_divisions.size();
+
+          segmentation.dummy_outgoing = lp.template add_factor<binary_factor_container>();
+          segmentation.exactly_one_outgoing = lp.template add_factor<exactly_one_minorant_factor_container>(size);
+
+          INDEX idx = 0;
+          segmentation.for_each_outgoing([&](auto* binary, auto* _) {
+            lp.template add_message<exactly_one_minorant_message_container>(binary, segmentation.exactly_one_outgoing, idx++);
+          });
+          assert(idx == size);
+
+          segmentation.exactly_one_outgoing_additional = lp.template add_factor<exactly_one_factor_container>(2);
+          lp.template add_message<exactly_one_message_container>(segmentation.detection, segmentation.exactly_one_outgoing_additional, 0);
+          lp.template add_message<exactly_one_message_container>(segmentation.dummy_outgoing, segmentation.exactly_one_outgoing_additional, 1);
+        };
+
+        /*
+        auto incoming_order = [&]() {
+          lp.AddAsymmetricFactorRelation(segmentation.dummy_incoming, segmentation.exactly_one_incoming_additional);
+          lp.AddAsymmetricFactorRelation(segmentation.exactly_one_incoming_additional, segmentation.detection);
+
+          segmentation.for_each_incoming([&](auto* binary, auto* connector) {
+            lp.AddAsymmetricFactorRelation(binary, segmentation.exactly_one_incoming);
+          });
+        };
+
+        auto outgoing_order = [&]() {
+          lp.AddAsymmetricFactorRelation(segmentation.detection, segmentation.exactly_one_outgoing_additional);
+          lp.AddAsymmetricFactorRelation(segmentation.exactly_one_outgoing_additional, segmentation.dummy_outgoing);
+
+          segmentation.for_each_outgoing([&](auto* binary, auto* connector) {
+            lp.AddAsymmetricFactorRelation(binary, segmentation.exactly_one_outgoing);
+          });
+        };
+        */
+
+        auto order = [&]() {
+          lp.AddFactorRelation(segmentation.dummy_incoming, segmentation.exactly_one_incoming_additional);
+          lp.AddFactorRelation(segmentation.exactly_one_incoming_additional, segmentation.detection);
+          segmentation.for_each_incoming([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
+            lp.AddFactorRelation(segmentation.exactly_one_incoming, binary);
+          });
+
+          lp.AddFactorRelation(segmentation.detection, segmentation.exactly_one_outgoing_additional);
+          lp.AddFactorRelation(segmentation.exactly_one_outgoing_additional, segmentation.dummy_outgoing);
+          segmentation.for_each_outgoing([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
+            lp.AddFactorRelation(segmentation.exactly_one_outgoing, binary);
+            lp.AddFactorRelation(connector, segmentation.exactly_one_outgoing);
+          });
+        /*
+          segmentation.for_each_incoming([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
+            if (connector != segmentation.exactly_one_incoming_additional)
+              lp.AddFactorRelation(connector, segmentation.exactly_one_incoming_additional);
+            lp.AddFactorRelation(binary, connector);
+            lp.AddFactorRelation(connector, segmentation.detection);
+          });
+
+          segmentation.for_each_outgoing([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
+            if (connector != segmentation.exactly_one_outgoing_additional)
+              lp.AddFactorRelation(connector, segmentation.exactly_one_outgoing_additional);
+            lp.AddFactorRelation(segmentation.detection, connector);
+            lp.AddFactorRelation(connector, binary);
+          });
+          */
+        };
+
+        incoming_uniqueness();
+        outgoing_uniqueness();
+        order();
+
+        // incoming_order();
+        // outgoing_order();
+      }
+
+      std::swap(prev_outgoing, curr_outgoing);
+    }
+
+    for (auto& timestep : exclusion_infos_) {
+      for (auto& exclusion : timestep) {
+        for (auto s : exclusion.segmentations) {
+          auto [timestep, hypothesis_id] = s;
+          auto& segmentation = segmentation_infos_[timestep][hypothesis_id];
+          segmentation.for_each_incoming([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
+            lp.AddFactorRelation(connector, exclusion.exactly_one);
+            lp.AddFactorRelation(exclusion.exactly_one, segmentation.detection);
+          });
+          /*
+          segmentation.for_each_outgoing([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
+            lp.AddFactorRelation(exclusion.exactly_one, connector);
+          });
+          */
+        }
+      }
+    }
+
+    for (INDEX timestep = 1; timestep < segmentation_infos_.size(); ++timestep) {
+      for (auto& segmentation_right : segmentation_infos_[timestep]) {
+        for (auto& segmentation_left : segmentation_infos_[timestep-1]) {
+          segmentation_left.for_each_outgoing([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
+            lp.AddFactorRelation(connector, segmentation_right.exactly_one_incoming);
+          });
+        }
       }
     }
   }
@@ -730,18 +899,260 @@ public:
     }
   }
 
-public: // FIXME: Make protected after changing API.
+  void output_graphviz(LP<FMC>& lp, const std::string& filename)
+  {
+    const auto& omega = lp.get_omega();
+
+    //
+    // Extract intrinsicts out of LP class.
+    //
+
+    std::map<const FactorTypeAdapter*, INDEX> factor_index;
+    for (INDEX i = 0; i < lp.GetNumberOfFactors(); ++i) {
+      assert(factor_index.find(lp.GetFactor(i)) == factor_index.end());
+      factor_index.insert(std::make_pair(lp.GetFactor(i), i));
+    }
+
+    int i = 0;
+    std::map<const FactorTypeAdapter*, INDEX> forward_update_index;
+    for (const auto* f : lp.forwardUpdateOrdering_) {
+      assert(forward_update_index.find(f) == forward_update_index.end());
+      forward_update_index.insert(std::make_pair(f, i++));
+    }
+
+    i = 0;
+    std::map<const FactorTypeAdapter*, INDEX> forward_index;
+    for (const auto* f : lp.forwardOrdering_) {
+      assert(forward_index.find(f) == forward_index.end());
+      forward_index.insert(std::make_pair(f, i++));
+    }
+
+    //
+    // Helpers for drawing.
+    //
+
+    auto f_name = [&](auto* f) {
+      std::stringstream s;
+      s << "\"f_" << f << "\"";
+      return s.str();
+    };
+
+    auto tooltip = [&](auto* f) {
+      std::stringstream s;
+
+      auto it = forward_update_index.find(f);
+      if (it != forward_update_index.end())
+        s << "s_fw=" << print_container(omega.forward[it->second]) << "\\n"
+          << "r_fw=" << print_container(omega.receive_mask_forward[it->second]);
+
+      return s.str();
+    };
+
+    auto format_node = [&](auto* f, std::string label) {
+      std::stringstream s;
+      s << f_name(f) << " [label=\"";
+
+      auto it = forward_update_index.find(f);
+      if (it != forward_update_index.end())
+        s << "[" << it->second << "]\\n";
+
+      s << label << "\",tooltip=\"" << tooltip(f) << "\"];\n";
+      return s.str();
+    };
+
+    auto get_s_fw = [&](FactorTypeAdapter* f_left, FactorTypeAdapter* f_right) {
+      bool found = false;
+      INDEX idx = 0;
+      for (auto msg : f_left->get_messages()) {
+        if (msg.sends_to_adjacent_factor) {
+          if (msg.adjacent_factor == f_right) {
+            found = true;
+            break;
+          }
+          ++idx;
+        }
+      }
+
+      if (!found)
+        return 0.0;
+
+      return omega.forward[forward_update_index.at(f_left)][idx];
+    };
+
+    auto get_r_fw = [&](FactorTypeAdapter* f_left, FactorTypeAdapter* f_right) {
+      bool found = false;
+      INDEX idx = 0;
+      for (auto msg : f_right->get_messages()) {
+        if (msg.receives_from_adjacent_factor) {
+          if (msg.adjacent_factor == f_left) {
+            found = true;
+            break;
+          }
+          ++idx;
+        }
+      }
+
+      if (!found)
+        return 0;
+
+      return omega.receive_mask_forward[forward_update_index.at(f_right)][idx];
+    };
+
+    auto format_edge = [&](FactorTypeAdapter* f_left, FactorTypeAdapter* f_right) {
+      auto s_fw = get_s_fw(f_left, f_right);
+      auto r_fw = get_r_fw(f_left, f_right);
+
+      std::stringstream s;
+      s << f_name(f_left) << " -> " << f_name(f_right) << " [label=\"";
+
+      if (s_fw > eps)
+        s << "s=" << s_fw;
+
+      if (s_fw > eps && r_fw > eps)
+        s << " ";
+
+      if (r_fw > eps)
+        s << "r=" << r_fw;
+
+      s  << "\"];\n";
+      return s.str();
+    };
+
+    auto draw_all_factors = [&](std::ostream& o) {
+      for (size_t timestep = 0; timestep < segmentation_infos_.size(); ++timestep) {
+        for (size_t hypothesis_id = 0; hypothesis_id < segmentation_infos_[timestep].size(); ++hypothesis_id) {
+          auto det_label = [&]() {
+            std::stringstream s;
+            s << "det(" << timestep << "," << hypothesis_id << ")";
+            return s.str();
+          };
+
+          auto app_label = [&]() {
+            std::stringstream s;
+            s << "app(" << timestep << "," << hypothesis_id << ")";
+            return s.str();
+          };
+
+          auto disapp_label = [&]() {
+            std::stringstream s;
+            s << "disapp(" << timestep << "," << hypothesis_id << ")";
+            return s.str();
+          };
+
+          auto& segmentation = segmentation_infos_[timestep][hypothesis_id];
+          o << format_node(segmentation.detection, det_label())
+            << format_node(segmentation.exactly_one_incoming, "=1 in")
+            << format_node(segmentation.dummy_incoming, "dummy in")
+            << format_node(segmentation.exactly_one_incoming_additional, "=1 in+")
+            << format_node(segmentation.exactly_one_outgoing, "=1 out")
+            << format_node(segmentation.dummy_outgoing, "dummy out")
+            << format_node(segmentation.exactly_one_outgoing_additional, "=1 out+")
+            << format_node(segmentation.appearance.binary, app_label())
+            << format_node(segmentation.appearance.implication, "→")
+            << format_node(segmentation.disappearance.binary, disapp_label())
+            << format_node(segmentation.disappearance.implication, "→");
+
+          for (auto e : segmentation.incoming_transitions) {
+            o << format_node(e.binary, "trans")
+              << format_node(e.implication, "→");
+          }
+
+          for (auto e : segmentation.incoming_divisions) {
+            o << format_node(e.binary, "div")
+              << format_node(e.implication, "→");
+          }
+
+          for (auto e : segmentation.outgoing_transitions) {
+            o << format_node(e.binary, "trans")
+              << format_node(e.implication, "→");
+          }
+
+          for (auto e : segmentation.outgoing_divisions) {
+            o << format_node(e.binary, "div")
+              << format_node(e.implication, "→");
+          }
+        }
+      }
+
+      for (const auto& timestep : exclusion_infos_) {
+        for (const auto& exclusion : timestep) {
+          o << format_node(exclusion.exactly_one, "=1")
+            << format_node(exclusion.dummy, "ex dummy");
+        }
+      }
+    };
+
+    auto draw_all_messages = [&](std::ostream& o) {
+      lp.for_each_message([&](auto* msg) {
+        FactorTypeAdapter* f_left = msg->GetLeftFactor();
+        FactorTypeAdapter* f_right = msg->GetRightFactor();
+
+        if (forward_index.at(f_left) > forward_index.at(f_right))
+          std::swap(f_left, f_right);
+
+        o << format_edge(f_left, f_right);
+      });
+    };
+
+    std::ofstream file(filename);
+    file << "digraph {\n";
+    draw_all_factors(file);
+    draw_all_messages(file);
+
+    file << "}";
+  }
+
+protected:
+
+public: // FIXME: We don't need this, but dictated by interface for now.
   std::vector<std::size_t> cumulative_sum_cell_detection_factors;
 
 protected:
+  struct edge_info {
+    edge_info() = default;
+
+    edge_info(binary_factor_container* b, implication_factor_container* i)
+    : binary(b), implication(i) { }
+
+    binary_factor_container* binary;
+    implication_factor_container* implication;
+  };
+
   struct segmentation_info {
     binary_factor_container* detection;
-    binary_factor_container* appearance;
-    binary_factor_container* disappearance;
-    std::vector<binary_factor_container*> incoming_transitions;
-    std::vector<binary_factor_container*> incoming_divisions;
-    std::vector<binary_factor_container*> outgoing_transitions;
-    std::vector<binary_factor_container*> outgoing_divisions;
+    edge_info appearance;
+    edge_info disappearance;
+    std::vector<edge_info> incoming_transitions;
+    std::vector<edge_info> incoming_divisions;
+    std::vector<edge_info> outgoing_transitions;
+    std::vector<edge_info> outgoing_divisions;
+    binary_factor_container* dummy_incoming;
+    binary_factor_container* dummy_outgoing;
+    exactly_one_minorant_factor_container* exactly_one_incoming;
+    exactly_one_factor_container* exactly_one_incoming_additional;
+    exactly_one_minorant_factor_container* exactly_one_outgoing;
+    exactly_one_factor_container* exactly_one_outgoing_additional;
+    // FIXME: Information about "=1" factors is missing.
+
+    template<typename FUNCTOR>
+    void for_each_incoming(FUNCTOR func) {
+      func(dummy_incoming, exactly_one_incoming_additional);
+      func(appearance.binary, appearance.implication);
+      for (auto e : incoming_transitions)
+        func(e.binary, e.implication);
+      for (auto e : incoming_divisions)
+        func(e.binary, e.implication);
+    };
+
+    template<typename FUNCTOR>
+    void for_each_outgoing(FUNCTOR func) {
+      func(dummy_outgoing, exactly_one_outgoing_additional);
+      func(disappearance.binary, disappearance.implication);
+      for (auto e : outgoing_transitions)
+        func(e.binary, e.implication);
+      for (auto e : outgoing_divisions)
+        func(e.binary, e.implication);
+    };
 
 #ifndef NDEBUG
     INDEX no_incoming_transitions, no_incoming_divisions, no_outgoing_transitions, no_outgoing_divisions;
@@ -750,6 +1161,15 @@ protected:
   using segmentation_info_storage = std::vector<std::vector<segmentation_info>>;
   segmentation_info_storage segmentation_infos_;
 
+  struct exclusion_info {
+    exactly_one_minorant_factor_container* exactly_one;
+    binary_factor_container* dummy;
+    std::vector<std::tuple<INDEX, INDEX>> segmentations;
+  };
+
+  using exclusion_info_storage = std::vector<std::vector<exclusion_info>>;
+  exclusion_info_storage exclusion_infos_;
+
   LP<FMC>* lp_;
 };
 
@@ -757,7 +1177,7 @@ struct FMC_MY {
   constexpr static const char* name = "My Cell Tracking";
   using FMC = FMC_MY;
 
-  using binary_factor_container = FactorContainer<binary_factor, FMC, 0, true>;
+  using binary_factor_container = FactorContainer<binary_factor, FMC, 0, /* true */ false>;
   using exactly_one_factor_container = FactorContainer<exactly_one_factor, FMC, 1, false>;
   using exactly_one_minorant_factor_container = FactorContainer<exactly_one_minorant_factor, FMC, 2, false>;
   using implication_factor_container = FactorContainer<implication_factor, FMC, 3, false>;
@@ -769,8 +1189,8 @@ struct FMC_MY {
 
   using exactly_one_message_container = MessageContainer<exactly_one_message, 0, 1, message_passing_schedule::right, variableMessageNumber, variableMessageNumber, FMC, 0>;
   using exactly_one_minorant_message_container = MessageContainer<exactly_one_minorant_message, 0, 2, message_passing_schedule::right, variableMessageNumber, variableMessageNumber, FMC, 1>;
-  using implication_left_message_container = MessageContainer<implication_message<Chirality::left>, 0, 3, message_passing_schedule::right, variableMessageNumber, variableMessageNumber, FMC, 2>;
-  using implication_right_message_container = MessageContainer<implication_message<Chirality::right>, 0, 3, message_passing_schedule::right, variableMessageNumber, variableMessageNumber, FMC, 3>;
+  using implication_left_message_container = MessageContainer<implication_message<Chirality::left>, 0, 3, message_passing_schedule::only_send, variableMessageNumber, 1, FMC, 2>;
+  using implication_right_message_container = MessageContainer<implication_message<Chirality::right>, 0, 3, message_passing_schedule::only_send, variableMessageNumber, 1, FMC, 3>;
   using MessageList = meta::list<
     exactly_one_message_container,
     exactly_one_minorant_message_container,
@@ -785,38 +1205,42 @@ struct FMC_MY {
 using namespace LP_MP;
 
 int main(int argc, char** argv) {
-#if 0
+#if 1
   using BaseSolver = Solver<LP<FMC_MY>, StandardVisitor>;
   MpRoundingSolver<BaseSolver> solver(argc, argv);
   solver.ReadProblem(cell_tracking_parser_2d::ParseProblem<BaseSolver>);
-  solver.Solve();
-#elif 1
+
+  auto& lp = solver.GetLP();
+  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
+  //solver.GetProblemConstructor<0>().debug_omega(lp);
+  solver.GetProblemConstructor<0>().output_graphviz(lp, "debug.dot");
+#elif 0
   using BaseSolver = Solver<LP_external_solver<DD_ILP::gurobi_interface, LP<FMC_MY>>, StandardVisitor>;
   BaseSolver solver(argc, argv);
   solver.ReadProblem(cell_tracking_parser_2d::ParseProblem<BaseSolver>);
   solver.GetLP().write_to_file("/tmp/my.lp");
   solver.GetLP().solve();
-
-  solver.GetProblemConstructor<0>().debug();
 #else
-  using BaseSolver = Solver<LP_external_solver<DD_ILP::gurobi_interface, LP<FMC_MY>>, StandardVisitor>;
-  BaseSolver solver(argc, argv);
+  using BaseSolver = Solver<LP<FMC_MY>, StandardVisitor>;
+  MpRoundingSolver<BaseSolver> solver(argc, argv);
+
   auto& lp = solver.GetLP();
+  auto* f0 = lp.template add_factor<FMC_MY::binary_factor_container>(1);
+  auto* f1 = lp.template add_factor<FMC_MY::exactly_one_minorant_factor_container>(1);
+  auto* f2 = lp.template add_factor<FMC_MY::exactly_one_minorant_factor_container>(1);
 
-  auto* f0 = lp.template add_factor<FMC_MY::binary_factor_container>(0);
-  auto* f1 = lp.template add_factor<FMC_MY::binary_factor_container>(10);
-  auto* f2 = lp.template add_factor<FMC_MY::exactly_one_minorant_factor_container>(2);
+  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f0, f1, 0);
   lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f0, f2, 0);
-  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f1, f2, 1);
 
-  auto* f3 = lp.template add_factor<FMC_MY::binary_factor_container>(20);
-  auto* f4 = lp.template add_factor<FMC_MY::binary_factor_container>(30);
-  auto* f5 = lp.template add_factor<FMC_MY::binary_factor_container>(40);
-  auto* f6 = lp.template add_factor<FMC_MY::exactly_one_minorant_factor_container>(3);
-  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f3, f6, 0);
-  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f4, f6, 1);
-  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f5, f6, 2);
+  lp.AddFactorRelation(f0, f1);
+  lp.AddFactorRelation(f0, f2);
 
-  solver.GetLP().solve();
+  lp.Begin();
+  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
+  lp.ComputeForwardPass();
+
+  std::cout << print_container(*(f0->GetFactor())) << std::endl;
+  std::cout << f1->GetFactor()->dual(0, false) << " " << f1->GetFactor()->dual(0, true) << std::endl;
+  std::cout << f2->GetFactor()->dual(0, false) << " " << f2->GetFactor()->dual(0, true) << std::endl;
 #endif
 }
