@@ -430,9 +430,15 @@ public:
   void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
   {
     assert(binary_idx_ >= 0 && binary_idx_ < r.no_binaries_);
-    // FIXME: This omega computation is error-prone.
-    msg[0] -= r.dual(binary_idx_, 0) * omega * r.no_binaries_;
-    msg[1] -= r.dual(binary_idx_, 1) * omega * r.no_binaries_;
+    // Compute min-marginal
+    REAL min_marginal_0 = std::numeric_limits<REAL>::infinity();
+    for (INDEX i = 0; i < r.no_binaries_; ++i)
+      if (i != binary_idx_)
+        min_marginal_0 = std::min(min_marginal_0, r.compute(i));
+    msg[0] -= min_marginal_0;
+
+    // Min-marginal of "1" state is simpler.
+    msg[1] -= r.compute(binary_idx_) * omega;
   }
 
   template<typename LEFT_FACTOR>
@@ -489,8 +495,8 @@ public:
   {
     assert(binary_idx_ >= 0 && binary_idx_ < r.no_binaries_);
     // FIXME: This omega computation is error-prone.
-    msg[0] -= r.dual(binary_idx_, 0) * omega * r.no_binaries_;
-    msg[1] -= r.dual(binary_idx_, 1) * omega * r.no_binaries_;
+    msg[0] -= r.minorant_[r.dual_idx(binary_idx_, 0)] * omega * r.no_binaries_;
+    msg[1] -= r.minorant_[r.dual_idx(binary_idx_, 1)] * omega * r.no_binaries_;
   }
 
   template<typename LEFT_FACTOR>
@@ -524,12 +530,12 @@ public:
   void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
   {
     if constexpr (CHIRALITY == Chirality::left) {
-      msg[0] -= r.duals_left_[0] + r.duals_right_[0];
-      msg[1] -= r.duals_left_[1] + std::min(r.duals_right_[0], r.duals_right_[1]);
+      msg[0] -= r.duals_left_[0] + std::min(r.duals_right_[0], r.duals_right_[1]);
+      msg[1] -= r.duals_left_[1] + r.duals_right_[1];
     } else {
       static_assert(CHIRALITY == Chirality::right);
-      msg[0] -= r.duals_right_[0] + std::min(r.duals_left_[0], r.duals_left_[1]);
-      msg[1] -= r.duals_right_[0] + r.duals_left_[1];
+      msg[0] -= r.duals_right_[0] + r.duals_left_[0];
+      msg[1] -= r.duals_right_[1] + std::min(r.duals_left_[0], r.duals_left_[1]);
     }
   }
 
@@ -592,6 +598,19 @@ public:
   using implication_left_message_container = typename FMC::implication_left_message_container;
   using implication_right_message_container = typename FMC::implication_right_message_container;
 
+  constexpr bool accept(INDEX timestep, INDEX hypothesis_id)
+  {
+#if 0
+    if (! (timestep >= 0 && timestep <= 0))
+      return false;
+
+    if (! (hypothesis_id >= 0 && hypothesis_id <= 0))
+      return false;
+#endif
+
+    return true;
+  }
+
   template<typename SOLVER>
   my_tracking_constructor(SOLVER& solver)
   : lp_(&solver.GetLP())
@@ -609,10 +628,8 @@ public:
     const INDEX no_incoming_transition_edges, const INDEX no_incoming_division_edges,
     const INDEX no_outgoing_transition_edges, const INDEX no_outgoing_division_edges)
   {
-#if 1
-    if (! (timestep >= 0 && timestep <= 1))
+    if (!accept(timestep, hypothesis_id))
       return;
-#endif
 
     assert(timestep < segmentation_infos_.size());
     if (hypothesis_id >= segmentation_infos_[timestep].size())
@@ -652,10 +669,8 @@ public:
     const INDEX timestep_next, const INDEX next_cell,
     const REAL cost)
   {
-#if 1
-    if (! (timestep_prev >= 0 && timestep_next <= 1))
+    if (!accept(timestep_prev, prev_cell) || !accept(timestep_next, next_cell))
       return;
-#endif
 
     auto& prev_factors = segmentation_infos_[timestep_prev][prev_cell];
     auto& next_factors = segmentation_infos_[timestep_next][next_cell];
@@ -685,10 +700,8 @@ public:
     const INDEX timestep_next_2, const INDEX next_cell_2,
     const REAL cost)
   {
-#if 1
-    if (! (timestep_prev >= 0 && std::max(timestep_next_1, timestep_next_2) <= 1))
+    if (!accept(timestep_prev, prev_cell) || !accept(timestep_next_1, next_cell_1) || !accept(timestep_next_2, next_cell_2))
       return;
-#endif
 
     auto& prev_factors = segmentation_infos_[timestep_prev][prev_cell];
     auto& next_factors_1 = segmentation_infos_[timestep_next_1][next_cell_1];
@@ -723,12 +736,11 @@ public:
   template<typename ITERATOR>
   void add_exclusion_constraint(LP<FMC>& lp, ITERATOR begin, ITERATOR end) // iterator points to std::array<INDEX,2>
   {
-    const INDEX timestep = (*begin)[0];
-#if 1
-    if (! (timestep >= 0 && timestep <= 1))
-      return;
-#endif
+    for (auto it = begin; it != end; ++it)
+      if (!accept(it->operator[](0), it->operator[](1)))
+        return;
 
+    const INDEX timestep = (*begin)[0];
     exclusion_infos_.resize(segmentation_infos_.size());
     exclusion_infos_[timestep].emplace_back();
     auto& exclusion = exclusion_infos_[timestep].back();
@@ -749,10 +761,10 @@ public:
     }
     assert(idx == n);
 
-    lp.AddFactorRelation(exclusion.exactly_one, exclusion.dummy);
+    lp.AddAsymmetricFactorRelation(exclusion.exactly_one, exclusion.dummy);
     for (auto s : exclusion.segmentations) {
       auto* f = segmentation_infos_[std::get<0>(s)][std::get<1>(s)].detection;
-      lp.AddFactorRelation(exclusion.exactly_one, f);
+      lp.AddAsymmetricFactorRelation(exclusion.exactly_one, f);
     }
   }
 
@@ -810,14 +822,15 @@ public:
           lp.AddFactorRelation(segmentation.dummy_incoming, segmentation.exactly_one_incoming_additional);
           lp.AddFactorRelation(segmentation.exactly_one_incoming_additional, segmentation.detection);
           segmentation.for_each_incoming([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
-            lp.AddFactorRelation(segmentation.exactly_one_incoming, binary);
+            lp.AddAsymmetricFactorRelation(segmentation.exactly_one_incoming, binary);
+            lp.BackwardPassFactorRelation(connector, segmentation.exactly_one_incoming);
           });
 
           lp.AddFactorRelation(segmentation.detection, segmentation.exactly_one_outgoing_additional);
           lp.AddFactorRelation(segmentation.exactly_one_outgoing_additional, segmentation.dummy_outgoing);
           segmentation.for_each_outgoing([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
-            lp.AddFactorRelation(segmentation.exactly_one_outgoing, binary);
-            lp.AddFactorRelation(connector, segmentation.exactly_one_outgoing);
+            lp.AddAsymmetricFactorRelation(segmentation.exactly_one_outgoing, binary);
+            lp.ForwardPassFactorRelation(connector, segmentation.exactly_one_outgoing);
           });
         };
 
@@ -833,8 +846,12 @@ public:
           auto [timestep, hypothesis_id] = s;
           auto& segmentation = segmentation_infos_[timestep][hypothesis_id];
           segmentation.for_each_incoming([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
-            lp.AddFactorRelation(connector, exclusion.exactly_one);
-            lp.AddFactorRelation(exclusion.exactly_one, segmentation.detection);
+            lp.ForwardPassFactorRelation(connector, exclusion.exactly_one);
+            lp.ForwardPassFactorRelation(exclusion.exactly_one, segmentation.detection);
+          });
+          segmentation.for_each_outgoing([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
+            lp.BackwardPassFactorRelation(connector, exclusion.exactly_one);
+            lp.BackwardPassFactorRelation(exclusion.exactly_one, segmentation.detection);
           });
         }
       }
@@ -844,7 +861,10 @@ public:
       for (auto& segmentation_right : segmentation_infos_[timestep]) {
         for (auto& segmentation_left : segmentation_infos_[timestep-1]) {
           segmentation_left.for_each_outgoing([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
-            lp.AddFactorRelation(connector, segmentation_right.exactly_one_incoming);
+            lp.ForwardPassFactorRelation(connector, segmentation_right.exactly_one_incoming);
+          });
+          segmentation_right.for_each_outgoing([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
+            lp.BackwardPassFactorRelation(connector, segmentation_left.exactly_one_outgoing);
           });
         }
       }
@@ -893,7 +913,7 @@ public:
         return omega.backward;
     };
 
-    auto get_omega_recv = [&omega]() constexpr -> auto&{
+    auto get_omega_recv = [&omega]() constexpr -> auto& {
       if constexpr (DIRECTION == graph_direction::forward)
         return omega.receive_mask_forward;
       else
@@ -910,7 +930,7 @@ public:
       factor_index.insert(std::make_pair(lp.GetFactor(i), i));
     }
 
-    int i = 0;
+    INDEX i = 0;
     std::map<const FactorTypeAdapter*, INDEX> update_index;
     for (const auto* f : get_update_ordering()) {
       assert(update_index.find(f) == update_index.end());
@@ -938,9 +958,30 @@ public:
       std::stringstream s;
 
       auto it = update_index.find(f);
-      if (it != update_index.end())
-        s << "s_fw=" << print_container(get_omega_send()[it->second]) << "\\n"
-          << "r_fw=" << print_container(get_omega_recv()[it->second]);
+      if (it != update_index.end()) {
+        std::vector<int> tmp_container; // convert `unsigned char` to `int`
+        tmp_container.assign(get_omega_send()[it->second].begin(), get_omega_send()[it->second].end());
+        s << "s_fw=" << print_container(tmp_container) << "\\n";
+        tmp_container.assign(get_omega_recv()[it->second].begin(), get_omega_recv()[it->second].end());
+        s << "r_fw=" << print_container(tmp_container) << "\\n";
+      }
+
+      s << "θ=";
+      if constexpr (std::is_same_v<decltype(f), binary_factor_container*>) {
+        s << print_container(*f->GetFactor());
+      } else if constexpr (std::is_same_v<decltype(f), exactly_one_factor_container*> || std::is_same_v<decltype(f), exactly_one_minorant_factor_container*>) {
+        auto [duals] = f->GetFactor()->export_variables();
+        s << print_container(duals);
+      } else if constexpr (std::is_same_v<decltype(f), implication_factor_container*>) {
+        auto [duals_left, duals_right] = f->GetFactor()->export_variables();
+        s << print_container(duals_left) << " + " << print_container(duals_right);
+      } else {
+        struct assert_not_reached;
+        static_assert(std::is_same_v<decltype(f), assert_not_reached>);
+      }
+      s << "\\n";
+
+      s << "lb=" << f->LowerBound();
 
       return s.str();
     };
@@ -970,10 +1011,7 @@ public:
         }
       }
 
-      if (!found)
-        return 0.0;
-
-      return get_omega_send()[update_index.at(f_left)][idx];
+      return found ? get_omega_send()[update_index.at(f_left)][idx] : 0.0;
     };
 
     auto get_r_fw = [&](FactorTypeAdapter* f_left, FactorTypeAdapter* f_right) {
@@ -989,10 +1027,7 @@ public:
         }
       }
 
-      if (!found)
-        return 0;
-
-      return get_omega_recv()[update_index.at(f_right)][idx];
+      return found ? get_omega_recv()[update_index.at(f_right)][idx] : 0.0;
     };
 
     auto format_edge = [&](FactorTypeAdapter* f_left, FactorTypeAdapter* f_right) {
@@ -1073,7 +1108,7 @@ public:
 
       for (const auto& timestep : exclusion_infos_) {
         for (const auto& exclusion : timestep) {
-          o << format_node(exclusion.exactly_one, "=1")
+          o << format_node(exclusion.exactly_one, "=1 ex")
             << format_node(exclusion.dummy, "ex dummy");
         }
       }
@@ -1097,6 +1132,61 @@ public:
     draw_all_messages(file);
 
     file << "}";
+  }
+
+#if 0
+  enum class factor_type { binary, implication, uniqueness, simple_uniqueness };
+
+  std::map<const FactorTypeAdapter*, factor_type> get_factor_types() const
+  {
+    std::map<const FactorTypeAdapter*, factor_type> mapping;
+
+    for (auto& timestep : segmentation_infos_) {
+      for (auto& segmentation : timestep) {
+        mapping[segmentation.detection] = factor_type::binary;
+        mapping[segmentation.appearance] = factor_type::binary;
+        mapping[segmentation.disappearance] = factor_type::binary;
+        mapping[segmentation.dummy_incoming] = factor_type::binary;
+        mapping[segmentation.dummy_outgoing] = factor_type::binary;
+        mapping[segmentation.exactly_one_incoming] = factor_type::uniqueness;
+        mapping[segmentation.exactly_one_incoming_additional] = factor_type::simple_uniqueness;
+        mapping[segmentation.exactly_one_outgoing] = factor_type::uniqueness;
+        mapping[segmentation.exactly_one_outgoing_additional] = factor_type::simple_uniqueness;
+
+        segmentation.for_each_incoming([&mapping](const FactorTypeAdapter* binary, const FactorTypeAdapter* connector) {
+          mapping[binary] = factor_type::binary;
+          mapping[connector] = factor_type::implication;
+        });
+
+        segmentation.for_each_outgoing([&mapping](const FactorTypeAdapter* binary, const FactorTypeAdapter* connector) {
+          mapping[binary] = factor_type::binary;
+          mapping[connector] = factor_type::implication;
+        });
+      }
+    }
+
+#ifndef NDEBUG
+    for (INDEX i = 0; i < lp_->GetNumberOfFactors(); ++i)
+      assert(mapping.find(lp_->GetFactor(i)) != mapping.end());
+#endif
+  }
+#endif
+
+  void fix_omegas()
+  {
+    lp_->set_reparametrization(LPReparametrizationMode::Anisotropic2);
+    auto omegas = lp_->get_omega();
+    auto forward_update_indices = lp_->get_forward_update_indices();
+    auto backward_update_indices = lp_->get_backward_update_indices();
+
+    lp_->for_each_factor([&](auto* f) {
+      if constexpr (std::is_same_v<decltype(f), exactly_one_minorant_factor_container*>) {
+        for (auto& x : omegas.receive_mask_forward[forward_update_indices.at(f)])
+          x = 1;
+        for (auto& x : omegas.receive_mask_backward[backward_update_indices.at(f)])
+          x = 1;
+      }
+    });
   }
 
 protected:
@@ -1197,6 +1287,69 @@ struct FMC_MY {
   using ProblemDecompositionList = meta::list<my_tracking_constructor<FMC>>;
 };
 
+#if 0
+class My_LP : public LP<FMC_MY> {
+private:
+  using Parent = LP<FMC_MY>;
+
+public:
+  using Parent::Parent;
+
+  omega_storage get_omega3() // override
+  {
+    std::cout << __PRETTY_FUNCTION__ << std::endl;
+
+    SortFactors();
+    switch (repamMode_) {
+      case LPReparametrizationMode::Anisotropic:
+        if(!omega_anisotropic_valid_) {
+          ComputeAnisotropicWeights();
+          omega_anisotropic_valid_ = true;
+        }
+        return omega_storage{omegaForwardAnisotropic_, omegaBackwardAnisotropic_, anisotropic_receive_mask_forward_, anisotropic_receive_mask_backward_};
+      case LPReparametrizationMode::DampedUniform:
+        if(!omega_isotropic_damped_valid_) {
+          ComputeDampedUniformWeights();
+          omega_isotropic_damped_valid_ = true;
+        }
+        if(!full_receive_mask_valid_) {
+          compute_full_receive_mask();
+          full_receive_mask_valid_ = true;
+        }
+        return omega_storage{omegaForwardIsotropicDamped_, omegaBackwardIsotropicDamped_, full_receive_mask_forward_, full_receive_mask_backward_};
+      default:
+        throw std::runtime_error("Unknown reparametrization");
+    }
+  }
+
+  void ComputeAnisotropicWeights3()
+  {
+    std::cout << __PRETTY_FUNCTION__ << std::endl;
+
+    ComputeAnisotropicWeights(forwardOrdering_.begin(), forwardOrdering_.end(), omegaForwardAnisotropic_, anisotropic_receive_mask_forward_);
+    ComputeAnisotropicWeights(backwardOrdering_.begin(), backwardOrdering_.end(), omegaBackwardAnisotropic_, anisotropic_receive_mask_backward_);
+
+    omega_valid(omegaForwardAnisotropic_);
+    omega_valid(omegaBackwardAnisotropic_);
+  }
+
+  template<typename FACTOR_ITERATOR>
+  void ComputeAnisotropicWeights3( FACTOR_ITERATOR factorIt, FACTOR_ITERATOR factorEndIt, weight_array& omega, receive_array& receive_mask)
+  {
+    std::cout << __PRETTY_FUNCTION__ << std::endl;
+
+    //const auto n = std::distance(factorIt,factorEndIt);
+    //assert(n <= f_.size());
+
+    auto factor_address_to_sorted_index = get_factor_indices(factorIt, factorEndIt); 
+    //auto factor_types = this->GetProblemConstructor<0>().get_factor_types();
+
+    omega = allocate_omega(factorIt, factorEndIt);
+    receive_mask = allocate_receive_mask(factorIt, factorEndIt);
+  }
+};
+#endif
+
 }
 
 using namespace LP_MP;
@@ -1204,13 +1357,19 @@ using namespace LP_MP;
 int main(int argc, char** argv) {
 #if 1
   using BaseSolver = Solver<LP<FMC_MY>, StandardVisitor>;
-  MpRoundingSolver<BaseSolver> solver(argc, argv);
+  //MpRoundingSolver<BaseSolver> solver(argc, argv);
+  BaseSolver solver(argc, argv);
   solver.ReadProblem(cell_tracking_parser_2d::ParseProblem<BaseSolver>);
+  solver.GetProblemConstructor<0>().fix_omegas();
 
   auto& lp = solver.GetLP();
-  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
-  solver.GetProblemConstructor<0>().output_graphviz<graph_direction::backward>(lp, "debug.dot");
-#elif 0
+  //lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
+  //lp.set_reparametrization(LPReparametrizationMode::DampedUniform);
+
+  //solver.GetProblemConstructor<0>().output_graphviz<graph_direction::forward>(lp, "debug.dot");
+  //std::cout << lp.LowerBound() << std::endl;
+  solver.Solve();
+#elif 1
   using BaseSolver = Solver<LP_external_solver<DD_ILP::gurobi_interface, LP<FMC_MY>>, StandardVisitor>;
   BaseSolver solver(argc, argv);
   solver.ReadProblem(cell_tracking_parser_2d::ParseProblem<BaseSolver>);
