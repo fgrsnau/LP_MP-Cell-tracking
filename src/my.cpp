@@ -1,3 +1,4 @@
+#include <random>
 #include <utility>
 #include "cell_tracking.h"
 #include "visitors/standard_visitor.hxx"
@@ -245,6 +246,39 @@ public:
 
   void MaximizePotential()
   {
+#if 1
+#ifndef NDEBUG
+    std::vector<REAL> old(duals_.begin(), duals_.end());
+#endif
+
+    // TODO: The current code assumes that the first connected factor is a
+    // dummy factor. This should be generalized.
+    assert(no_binaries_ - 1 >= 1);
+    REAL on_diff = dual(0, true) - dual(0, false);
+    REAL add_to_on = - on_diff * (1.0 - 1.0 / (no_binaries_-1));
+    REAL add_to_off = on_diff * (1.0 / (no_binaries_-1));
+    dual(0, true) = dual(0, false);
+    for (INDEX i = 1; i < no_binaries_; ++i) {
+      dual(i, true) += add_to_on;
+      dual(i, false) += add_to_off;
+    }
+
+#ifndef NDEBUG
+    assert(std::abs(dual(0, true) - dual(0, false)) < eps);
+    for (int i = 0; i < no_binaries_; ++i) {
+      REAL old_val = old[dual_idx(i, true)];
+      REAL new_val = dual(i, true);
+      for (int j = 0; j < no_binaries_; ++j) {
+        if (i != j) {
+          old_val += old[dual_idx(j, false)];
+          new_val += dual(j, false);
+        }
+      }
+      assert(std::abs(old_val - new_val) < eps);
+    }
+#endif
+#endif
+
     // This method computes the maximal minorant. FIXME: It implements a rather
     // generic scheme and could possibly be optimized for this very specific
     // case of binary variables with simplex constraint. For example, we know
@@ -256,19 +290,25 @@ public:
       minorant_[i] = 0;
       tmp_[i] = duals_[i];
     }
+    indicator_[0] = 0;
+    indicator_[1] = 0;
+    check();
 
     for (int iteration = 0; std::find(indicator_.begin(), indicator_.end(), 1) != indicator_.end(); ++iteration) {
       INDEX argmin = std::numeric_limits<INDEX>::max();
       REAL min = std::numeric_limits<REAL>::infinity();
       for (INDEX i = 0; i < no_binaries_; ++i) {
-        if (indicator_[dual_idx(i, true)]) {
-          REAL current = 0;
-          for (INDEX j = 0; j < no_binaries_; ++j)
-            current += tmp_[dual_idx(j, i == j)];
-          if (current < min) {
-            min = current;
-            argmin = i;
-          }
+        INDEX h_x = 0;
+        REAL current = 0;
+        for (INDEX j = 0; j < no_binaries_; ++j) {
+          current += tmp_[dual_idx(j, i == j)];
+          if (indicator_[dual_idx(j, i == j)])
+            ++h_x;
+        }
+        current /= h_x;
+        if (h_x != 0 && current < min) {
+          min = current;
+          argmin = i;
         }
       }
 
@@ -277,7 +317,8 @@ public:
         if (indicator_[dual_idx(i, i == argmin)])
           ++h_x;
 
-      REAL epsilon = min / h_x;
+      //REAL epsilon = min / h_x;
+      const REAL& epsilon = min;
 
       if (debug())
         std::cout << "[MINORANT] iteration = " << iteration << "  ->  argmin = " << argmin << " / h_x = " << h_x << " / epsilon = " << epsilon << std::endl;
@@ -286,26 +327,15 @@ public:
         minorant_[i] += epsilon * indicator_[i];
         tmp_[i]      -= epsilon * indicator_[i];
       }
+      check();
 
       for (INDEX i = 0; i < no_binaries_; ++i)
         indicator_[dual_idx(i, i == argmin)] = 0;
 
-      if (debug()) {
-        std::cout << "indicator_ = [";
-        for (INDEX i = 0; i < no_binaries_ * 2; ++i)
-          std::cout << " " << indicator_[i];
-        std::cout << " ];" << std::endl;
-
-        std::cout << "tmp_ = [";
-        for (INDEX i = 0; i < no_binaries_ * 2; ++i)
-          std::cout << " " << tmp_[i];
-        std::cout << " ];" << std::endl;
-
-        std::cout << "minorant_ = [";
-        for (INDEX i = 0; i < no_binaries_ * 2; ++i)
-          std::cout << " " << minorant_[i];
-        std::cout << " ];" << std::endl;
-      }
+      if (debug())
+        std::cout << "indicator_ = " << print_container(indicator_) << "\n"
+                  << "tmp_ = " << print_container(tmp_) << "\n"
+                  << "minorant_ = " << print_container(minorant_) << std::endl;
     }
   }
 
@@ -313,6 +343,14 @@ public:
   {
     MaximizePotential();
     exactly_one_factor::MaximizePotentialAndComputePrimal();
+    check();
+  }
+
+  void check() const
+  {
+    for (INDEX i = 0; i < no_binaries_*2; ++i) {
+      assert(std::abs(tmp_[i] - (duals_[i] - minorant_[i]) < eps));
+    }
   }
 
   const REAL& minorant(INDEX binary, bool flag) const { return minorant_[dual_idx(binary, flag)]; }
@@ -422,6 +460,8 @@ public:
   template<typename LEFT_FACTOR, typename G2>
   void send_message_to_right(LEFT_FACTOR& l, G2& msg, const REAL omega)
   {
+    if (debug())
+      std::cout << __PRETTY_FUNCTION__ << std::endl;
     msg[0] -= l[0] * omega;
     msg[1] -= l[1] * omega;
   }
@@ -429,6 +469,9 @@ public:
   template<typename RIGHT_FACTOR, typename G2>
   void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
   {
+    if (debug())
+      std::cout << __PRETTY_FUNCTION__ << std::endl;
+
     assert(binary_idx_ >= 0 && binary_idx_ < r.no_binaries_);
     // Compute min-marginal
     REAL min_marginal_0 = std::numeric_limits<REAL>::infinity();
@@ -444,6 +487,8 @@ public:
   template<typename LEFT_FACTOR>
   void RepamLeft(LEFT_FACTOR& l, const REAL msg, const INDEX msg_dim)
   {
+    if (debug())
+      std::cout << __PRETTY_FUNCTION__ << std::endl;
     assert(msg_dim >= 0 && msg_dim < 2);
     l[msg_dim] += msg;
   }
@@ -451,6 +496,8 @@ public:
   template<typename RIGHT_FACTOR>
   void RepamRight(RIGHT_FACTOR& r, const REAL msg, const INDEX msg_dim)
   {
+    if (debug())
+      std::cout << __PRETTY_FUNCTION__ << std::endl;
     assert(binary_idx_ >= 0 && binary_idx_ < r.no_binaries_);
     assert(msg_dim >= 0 && msg_dim < 2);
     r.dual(binary_idx_, msg_dim == 1) += msg;
@@ -486,6 +533,8 @@ public:
   template<typename LEFT_FACTOR, typename G2>
   void send_message_to_right(LEFT_FACTOR& l, G2& msg, const REAL omega)
   {
+    if (debug())
+      std::cout << __PRETTY_FUNCTION__ << std::endl;
     msg[0] -= l[0] * omega;
     msg[1] -= l[1] * omega;
   }
@@ -493,26 +542,74 @@ public:
   template<typename RIGHT_FACTOR, typename G2>
   void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
   {
+    if (debug())
+      std::cout << __PRETTY_FUNCTION__ << " -> r=" << &r << " msg=" << &msg << "  omega=" << omega << std::endl;
     assert(binary_idx_ >= 0 && binary_idx_ < r.no_binaries_);
-    // FIXME: This omega computation is error-prone.
-    msg[0] -= r.minorant_[r.dual_idx(binary_idx_, 0)] * omega * r.no_binaries_;
-    msg[1] -= r.minorant_[r.dual_idx(binary_idx_, 1)] * omega * r.no_binaries_;
+
+    // We have a the strict assumption, that we always push 100% out of the
+    // exactly_one factor.
+    assert(std::abs(omega * r.no_binaries_ - 1) < eps);
+
+    if (debug())
+      std::cout << "minorant_=" << print_container(r.minorant_) << std::endl;
+
+    msg[0] -= r.minorant(binary_idx_, false);
+    msg[1] -= r.minorant(binary_idx_, true);
   }
 
   template<typename LEFT_FACTOR>
   void RepamLeft(LEFT_FACTOR& l, const REAL msg, const INDEX msg_dim)
   {
+    if (debug())
+      std::cout << __PRETTY_FUNCTION__ << std::endl;
     assert(msg_dim >= 0 && msg_dim < 2);
+
+    if (debug()) {
+      std::cout << "l_before=" << print_container(l) << std::endl;
+      std::cout << "msg=" << msg << " msg_dim=" << msg_dim << std::endl;
+    }
+
     l[msg_dim] += msg;
+
+    if (debug())
+      std::cout << "l_after=" << print_container(l) << std::endl;
   }
 
   template<typename RIGHT_FACTOR>
   void RepamRight(RIGHT_FACTOR& r, const REAL msg, const INDEX msg_dim)
   {
+    if (debug())
+      std::cout << __PRETTY_FUNCTION__ << std::endl;
     assert(msg_dim >= 0 && msg_dim < 2);
     assert(binary_idx_ >= 0 && binary_idx_ < r.no_binaries_);
+
+    if (debug()) {
+      bool first = true;
+      std::cout << "r_before=[";
+      for (int i = 0; i < r.no_binaries_; ++i) {
+        if (!first)
+          std::cout << ", ";
+        std::cout << r.dual(i, false) << ", " << r.dual(i, true);
+        first = false;
+      }
+      std::cout << "]" << std::endl;
+    }
+
     r.dual(binary_idx_, msg_dim == 1) += msg;
     r.minorant(binary_idx_, msg_dim == 1) += msg; // send_message could be called multiple times, so we keep current minorant up to date
+    r.check();
+
+    if (debug()) {
+      std::cout << "r_after=[";
+      bool first = true;
+      for (int i = 0; i < r.no_binaries_; ++i) {
+        if (!first)
+          std::cout << ", ";
+        std::cout << r.dual(i, false) << ", " << r.dual(i, true);
+        first = false;
+      }
+      std::cout << "]" << std::endl;
+    }
   }
 };
 
@@ -522,6 +619,8 @@ public:
   template<typename LEFT_FACTOR, typename G2>
   void send_message_to_right(LEFT_FACTOR& l, G2& msg, const REAL omega)
   {
+    if (debug())
+      std::cout << __PRETTY_FUNCTION__ << std::endl;
     msg[0] -= l[0] * omega;
     msg[1] -= l[1] * omega;
   }
@@ -529,6 +628,8 @@ public:
   template<typename RIGHT_FACTOR, typename G2>
   void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
   {
+    if (debug())
+      std::cout << __PRETTY_FUNCTION__ << std::endl;
     if constexpr (CHIRALITY == Chirality::left) {
       msg[0] -= r.duals_left_[0] + std::min(r.duals_right_[0], r.duals_right_[1]);
       msg[1] -= r.duals_left_[1] + r.duals_right_[1];
@@ -542,12 +643,16 @@ public:
   template<typename LEFT_FACTOR>
   void RepamLeft(LEFT_FACTOR& l, const REAL msg, const INDEX msg_dim)
   {
+    if (debug())
+      std::cout << __PRETTY_FUNCTION__ << std::endl;
     l[msg_dim] += msg;
   }
 
   template<typename RIGHT_FACTOR>
   void RepamRight(RIGHT_FACTOR& r, const REAL msg, const INDEX msg_dim)
   {
+    if (debug())
+      std::cout << __PRETTY_FUNCTION__ << std::endl;
     if constexpr (CHIRALITY == Chirality::left) {
       r.duals_left_[msg_dim] += msg;
     } else {
@@ -1366,36 +1471,79 @@ int main(int argc, char** argv) {
   //lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
   //lp.set_reparametrization(LPReparametrizationMode::DampedUniform);
 
-  //solver.GetProblemConstructor<0>().output_graphviz<graph_direction::forward>(lp, "debug.dot");
-  //std::cout << lp.LowerBound() << std::endl;
+#if 0
+  for (int i = 0; i < 100; ++i) {
+    std::stringstream s;
+    s << "it_" << i << ".dot";
+    solver.GetProblemConstructor<0>().output_graphviz<graph_direction::forward>(lp, s.str());
+
+    std::cout << "iteration " << i << ": ";
+    if (i % 2 == 0) {
+      std::cout << "fw";
+      lp.ComputeForwardPass();
+    } else {
+      std::cout << "bw";
+      lp.ComputeBackwardPass();
+    }
+    std::cout << " -> " << lp.LowerBound() << std::endl;
+  }
+#else
   solver.Solve();
-#elif 1
+#endif
+#elif 0
   using BaseSolver = Solver<LP_external_solver<DD_ILP::gurobi_interface, LP<FMC_MY>>, StandardVisitor>;
   BaseSolver solver(argc, argv);
   solver.ReadProblem(cell_tracking_parser_2d::ParseProblem<BaseSolver>);
   solver.GetLP().write_to_file("/tmp/my.lp");
   solver.GetLP().solve();
 #else
-  using BaseSolver = Solver<LP<FMC_MY>, StandardVisitor>;
-  MpRoundingSolver<BaseSolver> solver(argc, argv);
+  std::mt19937 rng;
+  rng.seed(std::random_device()());
+  std::uniform_real_distribution<double> dist(-200.0, 200.0);
 
-  auto& lp = solver.GetLP();
-  auto* f0 = lp.template add_factor<FMC_MY::binary_factor_container>(1);
-  auto* f1 = lp.template add_factor<FMC_MY::exactly_one_minorant_factor_container>(1);
-  auto* f2 = lp.template add_factor<FMC_MY::exactly_one_minorant_factor_container>(1);
+  while (true) {
+    using BaseSolver = Solver<LP<FMC_MY>, StandardVisitor>;
+    MpRoundingSolver<BaseSolver> solver(argc, argv);
 
-  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f0, f1, 0);
-  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f0, f2, 0);
+    auto& lp = solver.GetLP();
+    auto* f0 = lp.template add_factor<FMC_MY::binary_factor_container>();
+    auto* f1 = lp.template add_factor<FMC_MY::binary_factor_container>();
+    auto* f2 = lp.template add_factor<FMC_MY::exactly_one_minorant_factor_container>(2);
 
-  lp.AddFactorRelation(f0, f1);
-  lp.AddFactorRelation(f0, f2);
+    (*f0->GetFactor())[0] = dist(rng);
+    (*f0->GetFactor())[1] = dist(rng);
 
-  lp.Begin();
-  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
-  lp.ComputeForwardPass();
+    (*f1->GetFactor())[0] = dist(rng);
+    (*f1->GetFactor())[1] = dist(rng);
 
-  std::cout << print_container(*(f0->GetFactor())) << std::endl;
-  std::cout << f1->GetFactor()->dual(0, false) << " " << f1->GetFactor()->dual(0, true) << std::endl;
-  std::cout << f2->GetFactor()->dual(0, false) << " " << f2->GetFactor()->dual(0, true) << std::endl;
+    f2->GetFactor()->dual(0, false) = dist(rng);
+    f2->GetFactor()->dual(0, true)  = dist(rng);
+    f2->GetFactor()->dual(1, false) = dist(rng);
+    f2->GetFactor()->dual(1, true)  = dist(rng);
+
+    std::cout << print_container(*(f0->GetFactor())) << std::endl;
+    std::cout << print_container(*(f1->GetFactor())) << std::endl;
+    std::cout << "[" << f2->GetFactor()->dual(0, false) << ", " << f2->GetFactor()->dual(0, true) << ", " << f2->GetFactor()->dual(1, false) << ", " << f2->GetFactor()->dual(1, true) << "]" << std::endl;
+    std::cout << "f0=" << f0->LowerBound() << " f1=" << f1->LowerBound() << " f2=" << f2->LowerBound() << " LB=" << lp.LowerBound() << std::endl;
+
+    lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f0, f2, 0);
+    lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f1, f2, 1);
+
+    lp.AddAsymmetricFactorRelation(f2, f0);
+    lp.AddAsymmetricFactorRelation(f2, f1);
+    lp.AddFactorRelation(f0, f1);
+
+    lp.Begin();
+    lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
+    auto omega = lp.get_omega();
+    omega.receive_mask_forward[0][0] = 1;
+    omega.receive_mask_forward[0][1] = 1;
+    solver.Solve();
+
+    std::cout << print_container(*(f0->GetFactor())) << std::endl;
+    std::cout << print_container(*(f1->GetFactor())) << std::endl;
+    std::cout << "[" << f2->GetFactor()->dual(0, false) << ", " << f2->GetFactor()->dual(0, true) << ", " << f2->GetFactor()->dual(1, false) << ", " << f2->GetFactor()->dual(1, true) << "]" << std::endl;
+    std::cout << "f0=" << f0->LowerBound() << " f1=" << f1->LowerBound() << " f2=" << f2->LowerBound() << " LB=" << lp.LowerBound() << std::endl;
+  }
 #endif
 }
