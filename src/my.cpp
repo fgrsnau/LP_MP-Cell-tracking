@@ -766,8 +766,13 @@ public:
 
     auto& fs = segmentation_infos_[timestep][hypothesis_id];
     fs.detection = lp.template add_factor<binary_factor_container>(detection_cost);
+    fs.dummy = lp.template add_factor<binary_factor_container>();
     fs.appearance.binary = lp.template add_factor<binary_factor_container>(appearance_cost);
     fs.disappearance.binary = lp.template add_factor<binary_factor_container>(disappearance_cost);
+
+    fs.exactly_one = lp.template add_factor<exactly_one_minorant_factor_container>(2);
+    lp.template add_message<exactly_one_minorant_message_container>(fs.dummy, fs.exactly_one, 0);
+    lp.template add_message<exactly_one_minorant_message_container>(fs.detection, fs.exactly_one, 1);
 
     fs.appearance.implication = lp.template add_factor<implication_factor_container>();
     lp.template add_message<implication_left_message_container>(fs.appearance.binary, fs.appearance.implication);
@@ -936,7 +941,6 @@ public:
         auto incoming_uniqueness = [&]() {
           INDEX size = 2 + segmentation.incoming_transitions.size() + segmentation.incoming_divisions.size();
 
-          segmentation.dummy_incoming = lp.template add_factor<binary_factor_container>();
           segmentation.exactly_one_incoming = lp.template add_factor<exactly_one_minorant_factor_container>(size, incoming_redistribute_functor);
 
           INDEX idx = 0;
@@ -944,16 +948,11 @@ public:
             lp.template add_message<exactly_one_minorant_message_container>(binary, segmentation.exactly_one_incoming, idx++);
           });
           assert(idx == size);
-
-          segmentation.exactly_one_incoming_additional = lp.template add_factor<exactly_one_factor_container>(2);
-          lp.template add_message<exactly_one_message_container>(segmentation.dummy_incoming, segmentation.exactly_one_incoming_additional, 0);
-          lp.template add_message<exactly_one_message_container>(segmentation.detection, segmentation.exactly_one_incoming_additional, 1);
         };
 
         auto outgoing_uniqueness = [&]() {
           INDEX size = 2 + segmentation.outgoing_transitions.size() + segmentation.outgoing_divisions.size();
 
-          segmentation.dummy_outgoing = lp.template add_factor<binary_factor_container>();
           segmentation.exactly_one_outgoing = lp.template add_factor<exactly_one_minorant_factor_container>(size, outgoing_redistribute_functor);
 
           INDEX idx = 0;
@@ -961,25 +960,25 @@ public:
             lp.template add_message<exactly_one_minorant_message_container>(binary, segmentation.exactly_one_outgoing, idx++);
           });
           assert(idx == size);
-
-          segmentation.exactly_one_outgoing_additional = lp.template add_factor<exactly_one_factor_container>(2);
-          lp.template add_message<exactly_one_message_container>(segmentation.detection, segmentation.exactly_one_outgoing_additional, 0);
-          lp.template add_message<exactly_one_message_container>(segmentation.dummy_outgoing, segmentation.exactly_one_outgoing_additional, 1);
         };
 
         auto order = [&]() {
-          lp.AddFactorRelation(segmentation.dummy_incoming, segmentation.exactly_one_incoming_additional);
-          lp.AddFactorRelation(segmentation.exactly_one_incoming_additional, segmentation.detection);
           segmentation.for_each_incoming([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
             lp.AddAsymmetricFactorRelation(segmentation.exactly_one_incoming, binary);
             lp.BackwardPassFactorRelation(connector, segmentation.exactly_one_incoming);
+
+            if (connector != segmentation.exactly_one)
+              lp.ForwardPassFactorRelation(connector, segmentation.exactly_one);
           });
 
-          lp.AddFactorRelation(segmentation.detection, segmentation.exactly_one_outgoing_additional);
-          lp.AddFactorRelation(segmentation.exactly_one_outgoing_additional, segmentation.dummy_outgoing);
+          lp.AddAsymmetricFactorRelation(segmentation.exactly_one, segmentation.detection);
+
           segmentation.for_each_outgoing([&](FactorTypeAdapter* binary, FactorTypeAdapter* connector) {
             lp.AddAsymmetricFactorRelation(segmentation.exactly_one_outgoing, binary);
             lp.ForwardPassFactorRelation(connector, segmentation.exactly_one_outgoing);
+
+            if (connector != segmentation.exactly_one)
+              lp.BackwardPassFactorRelation(connector, segmentation.exactly_one);
           });
         };
 
@@ -1035,6 +1034,10 @@ public:
   template<direction DIRECTION = direction::forward>
   void output_graphviz(LP<FMC>& lp, const std::string& filename)
   {
+#ifdef NDEBUG
+    return;
+#endif
+
     const auto& omega = lp.get_omega();
 
     //
@@ -1222,12 +1225,10 @@ public:
 
           auto& segmentation = segmentation_infos_[timestep][hypothesis_id];
           o << format_node(segmentation.detection, det_label())
+            << format_node(segmentation.exactly_one, "=1")
             << format_node(segmentation.exactly_one_incoming, "=1 in")
-            << format_node(segmentation.dummy_incoming, "dummy in")
-            << format_node(segmentation.exactly_one_incoming_additional, "=1 in+")
+            << format_node(segmentation.dummy, "dummy seg")
             << format_node(segmentation.exactly_one_outgoing, "=1 out")
-            << format_node(segmentation.dummy_outgoing, "dummy out")
-            << format_node(segmentation.exactly_one_outgoing_additional, "=1 out+")
             << format_node(segmentation.appearance.binary, app_label())
             << format_node(segmentation.appearance.implication, "→")
             << format_node(segmentation.disappearance.binary, disapp_label())
@@ -1361,23 +1362,20 @@ protected:
 
   struct segmentation_info {
     binary_factor_container* detection;
+    binary_factor_container* dummy;
+    exactly_one_minorant_factor_container* exactly_one;
     edge_info appearance;
     edge_info disappearance;
     std::vector<edge_info> incoming_transitions;
     std::vector<edge_info> incoming_divisions;
     std::vector<edge_info> outgoing_transitions;
     std::vector<edge_info> outgoing_divisions;
-    binary_factor_container* dummy_incoming;
-    binary_factor_container* dummy_outgoing;
     exactly_one_minorant_factor_container* exactly_one_incoming;
-    exactly_one_factor_container* exactly_one_incoming_additional;
     exactly_one_minorant_factor_container* exactly_one_outgoing;
-    exactly_one_factor_container* exactly_one_outgoing_additional;
-    // FIXME: Information about "=1" factors is missing.
 
     template<typename FUNCTOR>
     void for_each_incoming(FUNCTOR func) {
-      func(dummy_incoming, exactly_one_incoming_additional);
+      func(dummy, exactly_one);
       func(appearance.binary, appearance.implication);
       for (auto e : incoming_transitions)
         func(e.binary, e.implication);
@@ -1387,7 +1385,7 @@ protected:
 
     template<typename FUNCTOR>
     void for_each_outgoing(FUNCTOR func) {
-      func(dummy_outgoing, exactly_one_outgoing_additional);
+      func(dummy, exactly_one);
       func(disappearance.binary, disappearance.implication);
       for (auto e : outgoing_transitions)
         func(e.binary, e.implication);
