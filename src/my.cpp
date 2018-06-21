@@ -60,6 +60,50 @@ auto print_container(const CONTAINER& c)
   return print_iterator(c.begin(), c.end());
 }
 
+template<typename VECTOR1, typename VECTOR2>
+void redistribute_duals(VECTOR1& duals, const VECTOR2& active, size_t from)
+{
+  assert(duals.size() == active.size() * 2);
+  assert(from >= 0 && from < active.size());
+  assert(!active[from]);
+
+#ifndef NDEBUG
+  using vector1_element = std::decay_t<decltype(duals[0])>;
+  std::vector<vector1_element> old(duals.begin(), duals.end());
+#endif
+
+  auto id = [](const auto& x) -> bool { return x; };
+  const auto no_active = std::count_if(active.begin(), active.end(), id);
+  if (no_active >= 1) {
+    auto on_diff = duals[from*2 + 1] + duals[from*2];
+    auto add_to_on = - on_diff * (1.0 - 1.0 / no_active);
+    auto add_to_off = on_diff * (1.0 / no_active);
+
+    duals[from*2 + 1] = duals[from*2];
+    for (size_t i = 0; i < active.size(); ++i) {
+      if (active[i]) {
+        duals[i*2] += add_to_off;
+        duals[i*2 + 1] += add_to_on;
+      }
+    }
+  }
+
+#ifndef NDEBUG
+  assert(std::abs(duals[from*2+1] - duals[from*2]) < eps);
+  for (size_t i = 0; i < active.size(); ++i) {
+    auto old_val = old[i*2+1];
+    auto new_val = duals[i*2+1];
+    for (size_t j = 0; j < active.size(); ++j) {
+      if (i != j) {
+        old_val += old[j*2];
+        new_val += old[j*2];
+      }
+    }
+    assert(std::abs(old_val - new_val) < eps);
+  }
+#endif
+}
+
 class binary_factor : public std::array<REAL, 2> {
 public:
   binary_factor(REAL cost_on = 0, REAL cost_off = 0)
@@ -237,61 +281,37 @@ public:
 
 class exactly_one_minorant_factor : public exactly_one_factor {
 public:
-  exactly_one_minorant_factor(INDEX no_binaries)
+  using redistribute_functor = std::function<bool(INDEX i)>;
+
+  exactly_one_minorant_factor(INDEX no_binaries, redistribute_functor rf = redistribute_functor())
   : exactly_one_factor(no_binaries)
   , indicator_(no_binaries * 2)
   , minorant_(no_binaries * 2)
   , tmp_(no_binaries_ * 2)
+  , redistribute_functor_(std::move(rf))
   { }
 
   void MaximizePotential()
   {
-#if 1
-#ifndef NDEBUG
-    std::vector<REAL> old(duals_.begin(), duals_.end());
-#endif
-
-    // TODO: The current code assumes that the first connected factor is a
-    // dummy factor. This should be generalized.
-    assert(no_binaries_ - 1 >= 1);
-    REAL on_diff = dual(0, true) - dual(0, false);
-    REAL add_to_on = - on_diff * (1.0 - 1.0 / (no_binaries_-1));
-    REAL add_to_off = on_diff * (1.0 / (no_binaries_-1));
-    dual(0, true) = dual(0, false);
-    for (INDEX i = 1; i < no_binaries_; ++i) {
-      dual(i, true) += add_to_on;
-      dual(i, false) += add_to_off;
-    }
-
-#ifndef NDEBUG
-    assert(std::abs(dual(0, true) - dual(0, false)) < eps);
-    for (int i = 0; i < no_binaries_; ++i) {
-      REAL old_val = old[dual_idx(i, true)];
-      REAL new_val = dual(i, true);
-      for (int j = 0; j < no_binaries_; ++j) {
-        if (i != j) {
-          old_val += old[dual_idx(j, false)];
-          new_val += dual(j, false);
-        }
-      }
-      assert(std::abs(old_val - new_val) < eps);
-    }
-#endif
-#endif
-
     // This method computes the maximal minorant. FIXME: It implements a rather
     // generic scheme and could possibly be optimized for this very specific
     // case of binary variables with simplex constraint. For example, we know
     // the number of iterations beforehand, because we basically just try out
     // very specific configurations.
 
-    for (INDEX i = 0; i < no_binaries_ * 2; ++i) {
-      indicator_[i] = 1;
-      minorant_[i] = 0;
-      tmp_[i] = duals_[i];
+    for (INDEX i = 0; i < no_binaries_; ++i) {
+      for (bool on : { false, true }) {
+        const INDEX idx = dual_idx(i, on);
+
+        if (redistribute_functor_)
+          indicator_[idx] = redistribute_functor_(i) ? 1 : 0;
+        else
+          indicator_[idx] = 1;
+
+        minorant_[idx] = 0;
+        tmp_[idx] = duals_[idx];
+      }
     }
-    indicator_[0] = 0;
-    indicator_[1] = 0;
     check();
 
     for (int iteration = 0; std::find(indicator_.begin(), indicator_.end(), 1) != indicator_.end(); ++iteration) {
@@ -317,7 +337,6 @@ public:
         if (indicator_[dual_idx(i, i == argmin)])
           ++h_x;
 
-      //REAL epsilon = min / h_x;
       const REAL& epsilon = min;
 
       if (debug())
@@ -360,6 +379,7 @@ protected:
 
   vector<int> indicator_; // FIXME: bool does not work with this class
   vector<REAL> minorant_, tmp_;
+  redistribute_functor redistribute_functor_;
 
   friend class exactly_one_minorant_message;
 };
@@ -688,7 +708,7 @@ public:
   }
 };
 
-enum class graph_direction { forward, backward };
+enum class direction { forward, backward };
 
 template<typename FMC_T>
 class my_tracking_constructor {
@@ -707,6 +727,7 @@ public:
   {
 #if 0
     if (! (timestep >= 0 && timestep <= 0))
+
       return false;
 
     if (! (hypothesis_id >= 0 && hypothesis_id <= 0))
@@ -850,9 +871,13 @@ public:
     exclusion_infos_[timestep].emplace_back();
     auto& exclusion = exclusion_infos_[timestep].back();
 
+    auto redistribute_function = [](INDEX i) {
+      return i == 0 ? false : true;
+    };
+
     const INDEX n = std::distance(begin, end) + 1;
     exclusion.dummy = lp.template add_factor<binary_factor_container>();
-    exclusion.exactly_one = lp.template add_factor<exactly_one_minorant_factor_container>(n);
+    exclusion.exactly_one = lp.template add_factor<exactly_one_minorant_factor_container>(n, redistribute_function);
 
     INDEX idx = 0;
     lp.template add_message<exactly_one_minorant_message_container>(exclusion.dummy, exclusion.exactly_one, idx++);
@@ -879,6 +904,25 @@ public:
 
   void end(LP<FMC>& lp)
   {
+    const auto& captured_direction = direction_;
+    auto incoming_redistribute_functor = [&captured_direction](INDEX i) {
+      if (captured_direction == direction::forward) {
+        return true;
+      } else {
+        assert(captured_direction == direction::backward);
+        return i < 2 ? false : true;
+      }
+    };
+    auto outgoing_redistribute_functor = [&captured_direction](INDEX i) {
+      if (captured_direction == direction::forward) {
+        return i < 2 ? false : true;
+      } else {
+        assert(captured_direction == direction::backward);
+        return true;
+      }
+    };
+
+
     for (auto& timestep : segmentation_infos_) {
       for (auto& segmentation : timestep) {
         /*
@@ -893,7 +937,7 @@ public:
           INDEX size = 2 + segmentation.incoming_transitions.size() + segmentation.incoming_divisions.size();
 
           segmentation.dummy_incoming = lp.template add_factor<binary_factor_container>();
-          segmentation.exactly_one_incoming = lp.template add_factor<exactly_one_minorant_factor_container>(size);
+          segmentation.exactly_one_incoming = lp.template add_factor<exactly_one_minorant_factor_container>(size, incoming_redistribute_functor);
 
           INDEX idx = 0;
           segmentation.for_each_incoming([&](auto* binary, auto* _) {
@@ -910,7 +954,7 @@ public:
           INDEX size = 2 + segmentation.outgoing_transitions.size() + segmentation.outgoing_divisions.size();
 
           segmentation.dummy_outgoing = lp.template add_factor<binary_factor_container>();
-          segmentation.exactly_one_outgoing = lp.template add_factor<exactly_one_minorant_factor_container>(size);
+          segmentation.exactly_one_outgoing = lp.template add_factor<exactly_one_minorant_factor_container>(size, outgoing_redistribute_functor);
 
           INDEX idx = 0;
           segmentation.for_each_outgoing([&](auto* binary, auto* _) {
@@ -988,7 +1032,7 @@ public:
     }
   }
 
-  template<graph_direction DIRECTION = graph_direction::forward>
+  template<direction DIRECTION = direction::forward>
   void output_graphviz(LP<FMC>& lp, const std::string& filename)
   {
     const auto& omega = lp.get_omega();
@@ -998,28 +1042,28 @@ public:
     //
 
     auto get_update_ordering = [&lp]()constexpr -> auto& {
-      if constexpr (DIRECTION == graph_direction::forward)
+      if constexpr (DIRECTION == direction::forward)
         return lp.forwardUpdateOrdering_;
       else
         return lp.backwardUpdateOrdering_;
     };
 
     auto get_ordering = [&lp]() constexpr -> auto& {
-      if constexpr (DIRECTION == graph_direction::forward)
+      if constexpr (DIRECTION == direction::forward)
         return lp.forwardOrdering_;
       else
         return lp.backwardOrdering_;
     };
 
     auto get_omega_send = [&omega]() constexpr -> auto& {
-      if constexpr (DIRECTION == graph_direction::forward)
+      if constexpr (DIRECTION == direction::forward)
         return omega.forward;
       else
         return omega.backward;
     };
 
     auto get_omega_recv = [&omega]() constexpr -> auto& {
-      if constexpr (DIRECTION == graph_direction::forward)
+      if constexpr (DIRECTION == direction::forward)
         return omega.receive_mask_forward;
       else
         return omega.receive_mask_backward;
@@ -1294,6 +1338,11 @@ public:
     });
   }
 
+  void set_direction(direction d)
+  {
+    direction_ = d;
+  }
+
 protected:
 
 public: // FIXME: We don't need this, but dictated by interface for now.
@@ -1363,6 +1412,7 @@ protected:
   exclusion_info_storage exclusion_infos_;
 
   LP<FMC>* lp_;
+  direction direction_;
 };
 
 struct FMC_MY {
@@ -1466,28 +1516,23 @@ int main(int argc, char** argv) {
   BaseSolver solver(argc, argv);
   solver.ReadProblem(cell_tracking_parser_2d::ParseProblem<BaseSolver>);
   solver.GetProblemConstructor<0>().fix_omegas();
-
   auto& lp = solver.GetLP();
-  //lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
-  //lp.set_reparametrization(LPReparametrizationMode::DampedUniform);
 
-#if 0
+#if 1
+  lp.Begin();
+  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
   for (int i = 0; i < 100; ++i) {
-    std::stringstream s;
-    s << "it_" << i << ".dot";
-    solver.GetProblemConstructor<0>().output_graphviz<graph_direction::forward>(lp, s.str());
-
     std::cout << "iteration " << i << ": ";
-    if (i % 2 == 0) {
-      std::cout << "fw";
-      lp.ComputeForwardPass();
-    } else {
-      std::cout << "bw";
-      lp.ComputeBackwardPass();
-    }
-    std::cout << " -> " << lp.LowerBound() << std::endl;
+    std::cout << "fw -> ";
+    solver.GetProblemConstructor<0>().set_direction(direction::forward);
+    lp.ComputeForwardPass();
+    std::cout << lp.LowerBound() << " / bw -> ";
+    solver.GetProblemConstructor<0>().set_direction(direction::backward);
+    lp.ComputeBackwardPass();
+    std::cout << lp.LowerBound() << std::endl;
   }
 #else
+  // DOES NOT WORK, AS Ctor.set_direction IS NOT CALLED.
   solver.Solve();
 #endif
 #elif 0
@@ -1501,49 +1546,60 @@ int main(int argc, char** argv) {
   rng.seed(std::random_device()());
   std::uniform_real_distribution<double> dist(-200.0, 200.0);
 
-  while (true) {
-    using BaseSolver = Solver<LP<FMC_MY>, StandardVisitor>;
-    MpRoundingSolver<BaseSolver> solver(argc, argv);
+  using BaseSolver = Solver<LP<FMC_MY>, StandardVisitor>;
+  MpRoundingSolver<BaseSolver> solver(argc, argv);
 
-    auto& lp = solver.GetLP();
-    auto* f0 = lp.template add_factor<FMC_MY::binary_factor_container>();
-    auto* f1 = lp.template add_factor<FMC_MY::binary_factor_container>();
-    auto* f2 = lp.template add_factor<FMC_MY::exactly_one_minorant_factor_container>(2);
+  auto& lp = solver.GetLP();
+  auto* f0 = lp.template add_factor<FMC_MY::binary_factor_container>();
+  auto* f1 = lp.template add_factor<FMC_MY::binary_factor_container>();
+  auto* f2 = lp.template add_factor<FMC_MY::binary_factor_container>();
+  auto* f3 = lp.template add_factor<FMC_MY::exactly_one_minorant_factor_container>(3, [](INDEX i) {
+    std::cout << "lambda(" << i << ")" << std::endl;
+    return i == 0 ? false : true;
+  });
 
-    (*f0->GetFactor())[0] = dist(rng);
-    (*f0->GetFactor())[1] = dist(rng);
+  (*f0->GetFactor())[0] = dist(rng);
+  (*f0->GetFactor())[1] = dist(rng);
 
-    (*f1->GetFactor())[0] = dist(rng);
-    (*f1->GetFactor())[1] = dist(rng);
+  (*f1->GetFactor())[0] = dist(rng);
+  (*f1->GetFactor())[1] = dist(rng);
 
-    f2->GetFactor()->dual(0, false) = dist(rng);
-    f2->GetFactor()->dual(0, true)  = dist(rng);
-    f2->GetFactor()->dual(1, false) = dist(rng);
-    f2->GetFactor()->dual(1, true)  = dist(rng);
+  (*f2->GetFactor())[0] = dist(rng);
+  (*f2->GetFactor())[1] = dist(rng);
 
-    std::cout << print_container(*(f0->GetFactor())) << std::endl;
-    std::cout << print_container(*(f1->GetFactor())) << std::endl;
-    std::cout << "[" << f2->GetFactor()->dual(0, false) << ", " << f2->GetFactor()->dual(0, true) << ", " << f2->GetFactor()->dual(1, false) << ", " << f2->GetFactor()->dual(1, true) << "]" << std::endl;
-    std::cout << "f0=" << f0->LowerBound() << " f1=" << f1->LowerBound() << " f2=" << f2->LowerBound() << " LB=" << lp.LowerBound() << std::endl;
+  f3->GetFactor()->dual(0, false) = dist(rng);
+  f3->GetFactor()->dual(0, true)  = dist(rng);
+  f3->GetFactor()->dual(1, false) = dist(rng);
+  f3->GetFactor()->dual(1, true)  = dist(rng);
+  f3->GetFactor()->dual(2, false) = dist(rng);
+  f3->GetFactor()->dual(2, true)  = dist(rng);
 
-    lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f0, f2, 0);
-    lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f1, f2, 1);
+  std::cout << print_container(*(f0->GetFactor())) << std::endl;
+  std::cout << print_container(*(f1->GetFactor())) << std::endl;
+  std::cout << print_container(*(f2->GetFactor())) << std::endl;
+  std::cout << print_container(f3->GetFactor()->duals_) << std::endl;
 
-    lp.AddAsymmetricFactorRelation(f2, f0);
-    lp.AddAsymmetricFactorRelation(f2, f1);
-    lp.AddFactorRelation(f0, f1);
+  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f0, f3, 0);
+  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f1, f3, 1);
+  lp.template add_message<FMC_MY::exactly_one_minorant_message_container>(f2, f3, 2);
 
-    lp.Begin();
-    lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
-    auto omega = lp.get_omega();
-    omega.receive_mask_forward[0][0] = 1;
-    omega.receive_mask_forward[0][1] = 1;
-    solver.Solve();
+  lp.AddAsymmetricFactorRelation(f3, f0);
+  lp.AddAsymmetricFactorRelation(f3, f1);
+  lp.AddAsymmetricFactorRelation(f3, f2);
+  lp.AddFactorRelation(f0, f1);
+  lp.AddFactorRelation(f1, f2);
 
-    std::cout << print_container(*(f0->GetFactor())) << std::endl;
-    std::cout << print_container(*(f1->GetFactor())) << std::endl;
-    std::cout << "[" << f2->GetFactor()->dual(0, false) << ", " << f2->GetFactor()->dual(0, true) << ", " << f2->GetFactor()->dual(1, false) << ", " << f2->GetFactor()->dual(1, true) << "]" << std::endl;
-    std::cout << "f0=" << f0->LowerBound() << " f1=" << f1->LowerBound() << " f2=" << f2->LowerBound() << " LB=" << lp.LowerBound() << std::endl;
-  }
+  lp.Begin();
+  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
+  auto omega = lp.get_omega();
+  omega.receive_mask_forward[0][0] = 1;
+  omega.receive_mask_forward[0][1] = 1;
+  omega.receive_mask_forward[0][2] = 1;
+  lp.ComputeForwardPass();
+
+  std::cout << print_container(*(f0->GetFactor())) << std::endl;
+  std::cout << print_container(*(f1->GetFactor())) << std::endl;
+  std::cout << print_container(*(f2->GetFactor())) << std::endl;
+  std::cout << print_container(f3->GetFactor()->duals_) << std::endl;
 #endif
 }
