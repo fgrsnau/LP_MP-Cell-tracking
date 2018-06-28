@@ -110,6 +110,8 @@ void redistribute_duals(VECTOR1& duals, const VECTOR2& active, size_t from)
 #endif
 }
 
+enum class dual_selector { detection, appearance, disappearance, incoming, outgoing, size };
+
 class detection_factor {
 public:
   detection_factor(REAL detection_cost, REAL appearance_cost, REAL disappearance_cost, INDEX no_incoming, INDEX no_outgoing)
@@ -141,31 +143,93 @@ public:
   auto export_variables() { return std::tie(duals_); }
 
   template<typename SOLVER>
-  void construct_constraints(SOLVER& s, typename SOLVER::vector& v) const { }
+  void construct_constraints(SOLVER& s, typename SOLVER::vector& v) const
+  {
+    std::vector<typename SOLVER::variable> incoming_variables;
+    incoming_variables.push_back(v[dual_idx<dual_selector::appearance>(0)]);
+    for (INDEX i = 0; i < no_incoming_; ++i)
+      incoming_variables.push_back(v[dual_idx<dual_selector::incoming>(i)]);
+
+    std::vector<typename SOLVER::variable> outgoing_variables;
+    outgoing_variables.push_back(v[dual_idx<dual_selector::disappearance>(0)]);
+    for (INDEX i = 0; i < no_outgoing_; ++i)
+      incoming_variables.push_back(v[dual_idx<dual_selector::outgoing>(i)]);
+
+    auto incoming_sum = s.add_at_most_one_constraint(incoming_variables.begin(), incoming_variables.end());
+    auto outgoing_sum = s.add_at_most_one_constraint(outgoing_variables.begin(), outgoing_variables.end());
+
+    s.make_equal(v[dual_idx<dual_selector::detection>(0)], incoming_sum);
+    s.make_equal(v[dual_idx<dual_selector::detection>(0)], outgoing_sum);
+  }
 
   template<typename SOLVER>
   void convert_primal(SOLVER& s, typename SOLVER::vector& v) { }
 
-  REAL min_incoming() const {
+  REAL min_incoming() const
+  {
     REAL x = dual_appearance();
     for (INDEX i = 0; i < no_incoming_; ++i)
       x = std::min(x, dual_incoming(i));
     return x;
   };
 
-  REAL min_marginal_incoming(INDEX i) const {
+  REAL min_marginal_incoming(const INDEX i) const
+  {
     return dual_detection() + min_outgoing() + dual_incoming(i);
   }
 
-  REAL min_outgoing() const {
+  REAL min_marginal_incoming_diff(const INDEX i) const
+  {
+    const REAL detection_outgoing_cost = dual_detection() + min_outgoing();
+
+    const REAL incoming_min = min_incoming();
+    const REAL incoming_val = dual_incoming(i);
+    assert(incoming_val >= incoming_min);
+
+    if(incoming_val != incoming_min) {
+      return detection_outgoing_cost + incoming_val - std::min(detection_outgoing_cost + incoming_min, REAL(0.0)); 
+    } else {
+      std::vector<REAL> tmp(no_incoming_);
+      for (INDEX j = 0; j < no_incoming_; ++j)
+        tmp[j] = dual_incoming(j);
+      tmp[i] = std::numeric_limits<REAL>::infinity();
+      const REAL second_incoming_min = *std::min_element(tmp.begin(), tmp.end());
+
+      return detection_outgoing_cost + incoming_val - std::min(detection_outgoing_cost + second_incoming_min, REAL(0.0)); 
+    }
+  }
+
+  REAL min_outgoing() const
+  {
     REAL x = dual_disappearance();
     for (INDEX i = 0; i < no_outgoing_; ++i)
       x = std::min(x, dual_outgoing(i));
     return x;
   }
 
-  REAL min_marginal_outgoing(INDEX i) const {
+  REAL min_marginal_outgoing(const INDEX i) const {
     return dual_detection() + min_incoming() + dual_outgoing(i);
+  }
+
+  REAL min_marginal_outgoing_diff(const INDEX i) const
+  {
+    const REAL detection_incoming_cost = dual_detection() + min_incoming();
+
+    const REAL outgoing_min = min_outgoing();
+    const REAL outgoing_val = dual_outgoing(i);
+    assert(outgoing_val >= outgoing_min);
+
+    if(outgoing_val != outgoing_min) {
+      return detection_incoming_cost + outgoing_val - std::min(detection_incoming_cost + outgoing_min, REAL(0.0));
+    } else {
+      std::vector<REAL> tmp(no_outgoing_);
+      for (INDEX j = 0; j < no_outgoing_; ++j)
+        tmp[j] = dual_outgoing(j);
+      tmp[i] = std::numeric_limits<REAL>::infinity();
+      const REAL second_outgoing_min = *std::min_element(tmp.begin(), tmp.end());
+
+      return detection_incoming_cost + outgoing_val - std::min(detection_incoming_cost + second_outgoing_min, REAL(0.0));
+    }
   }
 
   REAL min_detection() const {
@@ -187,7 +251,6 @@ public:
   REAL& dual_outgoing(INDEX i) { return duals_[dual_idx<dual_selector::outgoing>(i)]; }
 
 protected:
-  enum class dual_selector { detection, appearance, disappearance, incoming, outgoing, size };
   template<dual_selector SELECTOR>
   size_t dual_idx(INDEX i) const {
     assert(i >= 0);
@@ -321,16 +384,14 @@ public:
   void send_message_to_right(LEFT_FACTOR& l, G2& msg, const REAL omega)
   {
     assert(from_ >= 0 && from_ < l.no_outgoing_);
-    //std::cout << __PRETTY_FUNCTION__ << "\n" << "msg[0] -= " << l.min_marginal_outgoing(from_) * (split_ ? 0.5 : 1.0) << std::endl;
-    msg[0] -= (l.min_marginal_outgoing(from_) - l.LowerBound()) * omega;
+    msg[0] -= omega * l.min_marginal_outgoing_diff(from_);
   }
 
   template<typename RIGHT_FACTOR, typename G2>
   void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
   {
     assert(to_ >= 0 && to_ < r.no_incoming_);
-    //std::cout << __PRETTY_FUNCTION__ << "\n" << "msg[0] -= " << r.min_marginal_incoming(to_) << std::endl;
-    msg[0] -= (r.min_marginal_incoming(to_) - r.LowerBound()) * omega;
+    msg[0] -= omega * r.min_marginal_incoming_diff(to_);
   }
 
   template<typename LEFT_FACTOR>
@@ -338,7 +399,6 @@ public:
   {
     assert(msg_dim == 0);
     l.dual_outgoing(from_) += msg;
-    //std::cout << __PRETTY_FUNCTION__ << "\n" << "msg = " << msg << std::endl;
   }
 
   template<typename RIGHT_FACTOR>
@@ -346,13 +406,18 @@ public:
   {
     assert(msg_dim == 0);
     r.dual_incoming(to_) += msg;
-    //std::cout << __PRETTY_FUNCTION__ << "\n" << "msg = " << msg << std::endl;
   }
 
   template<typename SOLVER, typename LEFT_FACTOR, typename RIGHT_FACTOR>
   void construct_constraints(SOLVER& s,
     LEFT_FACTOR& left, typename SOLVER::vector& v1,
-    RIGHT_FACTOR& right, typename SOLVER::vector& v2) const { }
+    RIGHT_FACTOR& right, typename SOLVER::vector& v2) const
+  {
+    s.make_equal(
+      v1[left.template dual_idx<dual_selector::outgoing>(from_)],
+      v2[right.template dual_idx<dual_selector::incoming>(to_)]
+    );
+  }
 
 protected:
   bool split_;
@@ -376,6 +441,7 @@ public:
   void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
   {
     assert(index_ >= 0 && index_ < r.duals_.size());
+    assert(std::abs(omega * r.duals_.size() - 1) < eps);
     msg[0] -= r.duals_[index_];
   }
 
@@ -475,7 +541,8 @@ public:
     auto* factor_next = detections_[timestep_next][hypothesis_next];
     auto& counters_next = factor_counters_[factor_next];
 
-    factor_prev->GetFactor()->dual_outgoing(counters_prev.second) = cost;
+    factor_prev->GetFactor()->dual_outgoing(counters_prev.second) = 0.5 * cost;
+    factor_next->GetFactor()->dual_incoming(counters_next.first) = 0.5 * cost;
     lp.template add_message<transition_message_container>(factor_prev, factor_next, false, counters_prev.second++, counters_next.first++);
 
     lp.AddFactorRelation(factor_prev, factor_next);
@@ -499,7 +566,9 @@ public:
     auto* factor_next_2 = detections_[timestep_next_2][hypothesis_next_2];
     auto& counters_next_2 = factor_counters_[factor_next_2];
 
-    factor_prev->GetFactor()->dual_outgoing(counters_prev.second) = cost;
+    factor_prev->GetFactor()->dual_outgoing(counters_prev.second) = 1.0/3.0 * cost;
+    factor_next_1->GetFactor()->dual_incoming(counters_next_1.first) = 1.0/3.0 * cost;
+    factor_next_2->GetFactor()->dual_incoming(counters_next_2.first) = 1.0/3.0 * cost;
     lp.template add_message<transition_message_container>(factor_prev, factor_next_1, true, counters_prev.second, counters_next_1.first++);
     lp.template add_message<transition_message_container>(factor_prev, factor_next_2, true, counters_prev.second++, counters_next_2.first++);
 
@@ -799,7 +868,7 @@ struct FMC_MY {
     detection_factor_container,
     at_most_one_cell_factor_container>;
 
-  using transition_message_container = MessageContainer<transition_message, 0, 0, message_passing_schedule::only_send, variableMessageNumber, variableMessageNumber, FMC, 0>;
+  using transition_message_container = MessageContainer<transition_message, 0, 0, message_passing_schedule::full, variableMessageNumber, variableMessageNumber, FMC, 0>;
   using at_most_one_cell_message_container = MessageContainer<at_most_one_cell_message, 0, 1, message_passing_schedule::right, variableMessageNumber, variableMessageNumber, FMC, 1>;
   using MessageList = meta::list<
     transition_message_container,
