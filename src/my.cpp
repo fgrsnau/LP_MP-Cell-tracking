@@ -1516,6 +1516,12 @@ int main(int argc, char** argv) {
   solver.GetProblemConstructor<0>().fix_omegas();
   auto& lp = solver.GetLP();
 
+  auto file_name = [](int iteration, bool fw) {
+    std::stringstream s;
+    s << "it_" << iteration << "_" << (fw ? "fw" : "bw") << ".dot";
+    return s.str();
+  };
+
 #if 1
   lp.Begin();
   lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
@@ -1523,9 +1529,11 @@ int main(int argc, char** argv) {
     std::cout << "iteration " << i << ": ";
     std::cout << "fw -> ";
     solver.GetProblemConstructor<0>().set_direction(direction::forward);
+    solver.GetProblemConstructor<0>().output_graphviz(lp, file_name(i, true));
     lp.ComputeForwardPass();
     std::cout << lp.LowerBound() << " / bw -> ";
     solver.GetProblemConstructor<0>().set_direction(direction::backward);
+    solver.GetProblemConstructor<0>().output_graphviz(lp, file_name(i, false));
     lp.ComputeBackwardPass();
     std::cout << lp.LowerBound() << std::endl;
   }
