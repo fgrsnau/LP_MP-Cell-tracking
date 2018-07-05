@@ -7,7 +7,9 @@
 #include "visitors/standard_visitor.hxx"
 #include "solver.hxx"
 
+#include "detection_factor.hxx"
 #include "cell_tracking_constructor.hxx"
+#include "uniform_minorant.hxx"
 
 namespace LP_MP {
 
@@ -15,103 +17,10 @@ template<typename CHECK> struct get_type;
 
 enum class direction { forward, backword };
 
-template<class T>
-std::string demangled_name(T &object)
-{
-  int status;
-  char *demangled = abi::__cxa_demangle(typeid(object).name(), 0, 0, &status);
-  if (status != 0)
-    throw std::runtime_error("Demangling failed.");
-  std::string result(demangled);
-  free(demangled);
-  return result;
-}
-
-template<typename ITERATOR>
-struct print_iterator_helper
-{
-  print_iterator_helper(ITERATOR begin, ITERATOR end)
-  : begin(begin)
-  , end(end)
-  { }
-
-  ITERATOR begin;
-  ITERATOR end;
-};
-
-template<typename ITERATOR>
-print_iterator_helper<ITERATOR> print_iterator(ITERATOR begin, ITERATOR end)
-{
-  return print_iterator_helper<ITERATOR>(begin, end);
-}
-
-template<typename ITERATOR>
-std::ostream& operator<<(std::ostream& o, const print_iterator_helper<ITERATOR> &pi)
-{
-  bool first = true;
-  o << "[";
-  for (ITERATOR it = pi.begin; it != pi.end; ++it) {
-    if (!first)
-      o << ", ";
-    o << *it;
-    first = false;
-  }
-  o << "]";
-  return o;
-}
-
-template<typename CONTAINER>
-auto print_container(const CONTAINER& c)
-{
-  return print_iterator(c.begin(), c.end());
-}
-
-template<typename VECTOR1, typename VECTOR2>
-void redistribute_duals(VECTOR1& duals, const VECTOR2& active, size_t from)
-{
-  assert(duals.size() == active.size() * 2);
-  assert(from >= 0 && from < active.size());
-  assert(!active[from]);
-
-#ifndef NDEBUG
-  using vector1_element = std::decay_t<decltype(duals[0])>;
-  std::vector<vector1_element> old(duals.begin(), duals.end());
-#endif
-
-  auto id = [](const auto& x) -> bool { return x; };
-  const auto no_active = std::count_if(active.begin(), active.end(), id);
-  if (no_active >= 1) {
-    auto on_diff = duals[from*2 + 1] + duals[from*2];
-    auto add_to_on = - on_diff * (1.0 - 1.0 / no_active);
-    auto add_to_off = on_diff * (1.0 / no_active);
-
-    duals[from*2 + 1] = duals[from*2];
-    for (size_t i = 0; i < active.size(); ++i) {
-      if (active[i]) {
-        duals[i*2] += add_to_off;
-        duals[i*2 + 1] += add_to_on;
-      }
-    }
-  }
-
-#ifndef NDEBUG
-  assert(std::abs(duals[from*2+1] - duals[from*2]) < eps);
-  for (size_t i = 0; i < active.size(); ++i) {
-    auto old_val = old[i*2+1];
-    auto new_val = duals[i*2+1];
-    for (size_t j = 0; j < active.size(); ++j) {
-      if (i != j) {
-        old_val += old[j*2];
-        new_val += old[j*2];
-      }
-    }
-    assert(std::abs(old_val - new_val) < eps);
-  }
-#endif
-}
 
 enum class dual_selector { detection, appearance, disappearance, incoming, outgoing, size };
 
+#if 0
 class detection_factor {
 public:
   detection_factor(REAL detection_cost, REAL appearance_cost, REAL disappearance_cost, INDEX no_incoming, INDEX no_outgoing)
@@ -178,27 +87,6 @@ public:
     return dual_detection() + min_outgoing() + dual_incoming(i);
   }
 
-  REAL min_marginal_incoming_diff(const INDEX i) const
-  {
-    const REAL detection_outgoing_cost = dual_detection() + min_outgoing();
-
-    const REAL incoming_min = min_incoming();
-    const REAL incoming_val = dual_incoming(i);
-    assert(incoming_val >= incoming_min);
-
-    if(incoming_val != incoming_min) {
-      return detection_outgoing_cost + incoming_val - std::min(detection_outgoing_cost + incoming_min, REAL(0.0)); 
-    } else {
-      std::vector<REAL> tmp(no_incoming_);
-      for (INDEX j = 0; j < no_incoming_; ++j)
-        tmp[j] = dual_incoming(j);
-      tmp[i] = std::numeric_limits<REAL>::infinity();
-      const REAL second_incoming_min = *std::min_element(tmp.begin(), tmp.end());
-
-      return detection_outgoing_cost + incoming_val - std::min(detection_outgoing_cost + second_incoming_min, REAL(0.0)); 
-    }
-  }
-
   REAL min_outgoing() const
   {
     REAL x = dual_disappearance();
@@ -209,27 +97,6 @@ public:
 
   REAL min_marginal_outgoing(const INDEX i) const {
     return dual_detection() + min_incoming() + dual_outgoing(i);
-  }
-
-  REAL min_marginal_outgoing_diff(const INDEX i) const
-  {
-    const REAL detection_incoming_cost = dual_detection() + min_incoming();
-
-    const REAL outgoing_min = min_outgoing();
-    const REAL outgoing_val = dual_outgoing(i);
-    assert(outgoing_val >= outgoing_min);
-
-    if(outgoing_val != outgoing_min) {
-      return detection_incoming_cost + outgoing_val - std::min(detection_incoming_cost + outgoing_min, REAL(0.0));
-    } else {
-      std::vector<REAL> tmp(no_outgoing_);
-      for (INDEX j = 0; j < no_outgoing_; ++j)
-        tmp[j] = dual_outgoing(j);
-      tmp[i] = std::numeric_limits<REAL>::infinity();
-      const REAL second_outgoing_min = *std::min_element(tmp.begin(), tmp.end());
-
-      return detection_incoming_cost + outgoing_val - std::min(detection_incoming_cost + second_outgoing_min, REAL(0.0));
-    }
   }
 
   REAL min_detection() const {
@@ -327,17 +194,15 @@ public:
     *argmin1 = std::numeric_limits<REAL>::infinity();
     auto argmin2 = std::min_element(duals_.begin(), duals_.end());
     auto min2 = *argmin2;
-    auto diff = min2 - min1;
+    auto diff_over_two = min2 - min1 / 2.0;
 
-    constant_ += min1 + diff/2.0;
-    *argmin1 = -diff/2.0;
-    *argmin2 = diff/2.0;
+    constant_ += min1 + diff_over_two;
+    *argmin1 = - diff_over_two;
+    *argmin2 = diff_over_two;
 
-    for (auto it = duals_.begin(); it != duals_.end(); ++it) {
-      if (it != argmin1 && it != argmin2) {
-        *it -= min1 + diff/2.0;
-      }
-    }
+    for (auto it = duals_.begin(); it != duals_.end(); ++it)
+      if (it != argmin1 && it != argmin2)
+        *it -= min1 + diff_over_two;
 
 #ifndef NDEBUG
     for (INDEX i = 0; i < duals_.size(); ++i)
@@ -384,14 +249,14 @@ public:
   void send_message_to_right(LEFT_FACTOR& l, G2& msg, const REAL omega)
   {
     assert(from_ >= 0 && from_ < l.no_outgoing_);
-    msg[0] -= omega * l.min_marginal_outgoing_diff(from_);
+    msg[0] -= omega * l.min_marginal_outgoing(from_);
   }
 
   template<typename RIGHT_FACTOR, typename G2>
   void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
   {
     assert(to_ >= 0 && to_ < r.no_incoming_);
-    msg[0] -= omega * r.min_marginal_incoming_diff(to_);
+    msg[0] -= omega * r.min_marginal_outgoing(to_);
   }
 
   template<typename LEFT_FACTOR>
@@ -434,12 +299,14 @@ public:
   template<typename LEFT_FACTOR, typename G2>
   void send_message_to_right(LEFT_FACTOR& l, G2& msg, const REAL omega)
   {
+    assert(std::abs(omega - 1) < eps);
     msg[0] -= l.min_marginal_detection();
   }
 
   template<typename RIGHT_FACTOR, typename G2>
   void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
   {
+    std::cout << __PRETTY_FUNCTION__ << "\n" << omega << " / " << r.duals_.size() << std::endl;
     assert(index_ >= 0 && index_ < r.duals_.size());
     assert(std::abs(omega * r.duals_.size() - 1) < eps);
     msg[0] -= r.duals_[index_];
@@ -468,6 +335,7 @@ public:
 protected:
   INDEX index_;
 };
+#endif
 
 template<typename FMC_T>
 class my_tracking_constructor {
@@ -482,11 +350,11 @@ public:
   constexpr bool accept(INDEX timestep, INDEX hypothesis_id)
   {
 #if 0
-    if (! (timestep >= 0 && timestep <= 3))
+    if (! (timestep >= 0 && timestep <= 1))
       return false;
 
-    //if (! (hypothesis_id >= 0 && hypothesis_id <= 2))
-    //  return false;
+    if (! (hypothesis_id >= 0 && hypothesis_id <= 1))
+      return false;
 #endif
 
     return true;
@@ -521,10 +389,14 @@ public:
       assert(detections_[timestep][hypothesis_id-1] != nullptr);
 
     auto* f = lp.template add_factor<detection_factor_container>(
-      detection_cost, appearance_cost, disappearance_cost,
-      no_incoming_transitions + no_incoming_divisions,
-      no_outgoing_transitions + no_outgoing_divisions);
+      no_incoming_transitions, no_incoming_divisions,
+      no_outgoing_transitions, no_outgoing_divisions,
+      detection_cost, appearance_cost, disappearance_cost);
     detections_[timestep][hypothesis_id] = f;
+    factor_counters_[f].no_incoming_transition_edges = no_incoming_transitions;
+    factor_counters_[f].no_incoming_division_edges = no_incoming_divisions;
+    factor_counters_[f].no_outgoing_transition_edges = no_outgoing_transitions;
+    factor_counters_[f].no_outgoing_division_edges = no_outgoing_divisions;
   }
 
   void add_cell_transition(LP<FMC>& lp,
@@ -541,9 +413,9 @@ public:
     auto* factor_next = detections_[timestep_next][hypothesis_next];
     auto& counters_next = factor_counters_[factor_next];
 
-    factor_prev->GetFactor()->dual_outgoing(counters_prev.second) = 0.5 * cost;
-    factor_next->GetFactor()->dual_incoming(counters_next.first) = 0.5 * cost;
-    lp.template add_message<transition_message_container>(factor_prev, factor_next, false, counters_prev.second++, counters_next.first++);
+    factor_prev->GetFactor()->set_outgoing_transition_cost(counters_prev.no_outgoing_transition_edges, counters_prev.no_outgoing_division_edges, counters_prev.outgoing_transition_edge_count, 0.5 * cost);
+    factor_next->GetFactor()->set_incoming_transition_cost(counters_next.no_incoming_transition_edges, counters_next.no_incoming_division_edges, counters_next.incoming_transition_edge_count, 0.5 * cost);
+    lp.template add_message<transition_message_container>(factor_prev, factor_next, false, counters_prev.outgoing_transition_edge_count++, counters_next.incoming_transition_edge_count++);
 
     lp.AddFactorRelation(factor_prev, factor_next);
   }
@@ -566,11 +438,11 @@ public:
     auto* factor_next_2 = detections_[timestep_next_2][hypothesis_next_2];
     auto& counters_next_2 = factor_counters_[factor_next_2];
 
-    factor_prev->GetFactor()->dual_outgoing(counters_prev.second) = 1.0/3.0 * cost;
-    factor_next_1->GetFactor()->dual_incoming(counters_next_1.first) = 1.0/3.0 * cost;
-    factor_next_2->GetFactor()->dual_incoming(counters_next_2.first) = 1.0/3.0 * cost;
-    lp.template add_message<transition_message_container>(factor_prev, factor_next_1, true, counters_prev.second, counters_next_1.first++);
-    lp.template add_message<transition_message_container>(factor_prev, factor_next_2, true, counters_prev.second++, counters_next_2.first++);
+    factor_prev->GetFactor()->set_outgoing_division_cost(counters_prev.no_outgoing_transition_edges, counters_prev.no_outgoing_division_edges, counters_prev.outgoing_division_edge_count, 1.0/3.0 * cost);
+    factor_next_1->GetFactor()->set_incoming_division_cost(counters_next_1.no_incoming_transition_edges, counters_next_1.no_incoming_division_edges, counters_next_1.incoming_division_edge_count, 1.0/3.0 * cost);
+    factor_next_2->GetFactor()->set_incoming_division_cost(counters_next_2.no_incoming_transition_edges, counters_next_2.no_incoming_division_edges, counters_next_2.incoming_division_edge_count, 1.0/3.0 * cost);
+    lp.template add_message<transition_message_container>(factor_prev, factor_next_1, true, counters_prev.no_outgoing_transition_edges + counters_prev.outgoing_division_edge_count, counters_next_1.no_incoming_transition_edges + counters_next_1.incoming_division_edge_count++);
+    lp.template add_message<transition_message_container>(factor_prev, factor_next_2, true, counters_prev.no_outgoing_transition_edges + counters_prev.outgoing_division_edge_count++, counters_next_2.no_incoming_transition_edges + counters_next_2.incoming_division_edge_count++);
 
     lp.AddFactorRelation(factor_prev, factor_next_1);
     lp.AddFactorRelation(factor_prev, factor_next_2);
@@ -602,6 +474,7 @@ public:
       lp.AddAsymmetricFactorRelation(exclusion.at_most_one, f);
     }
     assert(idx == n);
+    assert(idx > 1);
   }
 
   void begin(LP<FMC>& lp, const std::size_t no_cell_detection_hypotheses, const std::size_t no_transitions, const std::size_t no_divisions)
@@ -621,6 +494,13 @@ public:
             lp.AddFactorRelation(exclusion.at_most_one, detection);
       }
     }
+
+    for (auto x : factor_counters_) {
+      assert(x.second.no_incoming_transition_edges == x.second.incoming_transition_edge_count);
+      assert(x.second.no_incoming_division_edges == x.second.incoming_division_edge_count);
+      assert(x.second.no_outgoing_transition_edges == x.second.outgoing_transition_edge_count);
+      assert(x.second.no_outgoing_division_edges == x.second.outgoing_division_edge_count);
+    }
   }
 
   template<direction DIRECTION = direction::forward>
@@ -632,18 +512,18 @@ public:
     // Useless template metaprogramming shizzle.
     //
 
-    auto get_update_ordering = [&lp]()constexpr -> auto& {
+    auto get_update_indices = [&lp]() constexpr {
       if constexpr (DIRECTION == direction::forward)
-        return lp.forwardUpdateOrdering_;
+        return lp.get_forward_update_indices();
       else
-        return lp.backwardUpdateOrdering_;
+        return lp.get_backward_update_indices();
     };
 
-    auto get_ordering = [&lp]() constexpr -> auto& {
+    auto get_ordered_indices = [&lp]() constexpr {
       if constexpr (DIRECTION == direction::forward)
-        return lp.forwardOrdering_;
+        return lp.get_forward_indices();
       else
-        return lp.backwardOrdering_;
+        return lp.get_backward_indices();
     };
 
     auto get_omega_send = [&omega]() constexpr -> auto& {
@@ -664,25 +544,8 @@ public:
     // Extract intrinsicts out of LP class.
     //
 
-    std::map<const FactorTypeAdapter*, INDEX> factor_index;
-    for (INDEX i = 0; i < lp.GetNumberOfFactors(); ++i) {
-      assert(factor_index.find(lp.GetFactor(i)) == factor_index.end());
-      factor_index.insert(std::make_pair(lp.GetFactor(i), i));
-    }
-
-    INDEX i = 0;
-    std::map<const FactorTypeAdapter*, INDEX> update_index;
-    for (const auto* f : get_update_ordering()) {
-      assert(update_index.find(f) == update_index.end());
-      update_index.insert(std::make_pair(f, i++));
-    }
-
-    i = 0;
-    std::map<const FactorTypeAdapter*, INDEX> ordered_index;
-    for (const auto* f : get_ordering()) {
-      assert(ordered_index.find(f) == ordered_index.end());
-      ordered_index.insert(std::make_pair(f, i++));
-    }
+    auto update_indices = get_update_indices();
+    auto ordered_indices = get_ordered_indices();
 
     //
     // Helpers for drawing.
@@ -697,8 +560,8 @@ public:
     auto tooltip = [&](auto* f) {
       std::stringstream s;
 
-      auto it = update_index.find(f);
-      if (it != update_index.end()) {
+      auto it = update_indices.find(f);
+      if (it != update_indices.end()) {
         std::vector<REAL> tmp_container; // convert `unsigned char` to `REAL`
         tmp_container.assign(get_omega_send()[it->second].begin(), get_omega_send()[it->second].end());
         s << "s_fw=" << print_container(tmp_container) << "\\n";
@@ -707,8 +570,8 @@ public:
       }
 
       s << "θ=";
-      auto [duals] = f->GetFactor()->export_variables();
-      s << print_container(duals);
+      //auto [duals] = f->GetFactor()->export_variables();
+      //s << print_container(duals);
       s << "\\n";
 
       s << "lb=" << f->LowerBound();
@@ -720,8 +583,8 @@ public:
       std::stringstream s;
       s << f_name(f) << " [label=\"";
 
-      auto it = update_index.find(f);
-      if (it != update_index.end())
+      auto it = update_indices.find(f);
+      if (it != update_indices.end())
         s << "[" << it->second << "]\\n";
 
       s << label << "\",tooltip=\"" << tooltip(f) << "\"];\n";
@@ -741,7 +604,7 @@ public:
         }
       }
 
-      return found ? get_omega_send()[update_index.at(f_left)][idx] : 0.0;
+      return found ? get_omega_send()[update_indices.at(f_left)][idx] : 0.0;
     };
 
     auto get_r_fw = [&](FactorTypeAdapter* f_left, FactorTypeAdapter* f_right) {
@@ -757,7 +620,7 @@ public:
         }
       }
 
-      return found ? get_omega_recv()[update_index.at(f_right)][idx] : 0.0;
+      return found ? get_omega_recv()[update_indices.at(f_right)][idx] : 0.0;
     };
 
     auto format_edge = [&](FactorTypeAdapter* f_left, FactorTypeAdapter* f_right) {
@@ -806,7 +669,7 @@ public:
         FactorTypeAdapter* f_left = msg->GetLeftFactor();
         FactorTypeAdapter* f_right = msg->GetRightFactor();
 
-        if (ordered_index.at(f_left) > ordered_index.at(f_right))
+        if (ordered_indices.at(f_left) > ordered_indices.at(f_right))
           std::swap(f_left, f_right);
 
         o << format_edge(f_left, f_right);
@@ -829,6 +692,10 @@ public:
 
     lp_->for_each_factor([&](auto* f) {
       if constexpr (std::is_same_v<decltype(f), at_most_one_cell_factor_container*>) {
+        for (auto& x : omegas.forward[forward_update_indices.at(f)])
+          x = 1.0 / omegas.forward[forward_update_indices.at(f)].size();
+        for (auto& x : omegas.backward[backward_update_indices.at(f)])
+          x = 1.0 / omegas.backward[backward_update_indices.at(f)].size();
         for (auto& x : omegas.receive_mask_forward[forward_update_indices.at(f)])
           x = 1;
         for (auto& x : omegas.receive_mask_backward[backward_update_indices.at(f)])
@@ -853,7 +720,7 @@ protected:
   using exclusion_storage = std::vector<std::vector<exclusion>>;
   exclusion_storage exclusions_;
 
-  std::map<FactorTypeAdapter*, std::pair<INDEX, INDEX>> factor_counters_;
+  std::unordered_map<FactorTypeAdapter*, cell_tracking_transition_count::edge_type> factor_counters_;
 
   LP<FMC>* lp_;
 };
@@ -863,13 +730,13 @@ struct FMC_MY {
   using FMC = FMC_MY;
 
   using detection_factor_container = FactorContainer<detection_factor, FMC, 0, false>;
-  using at_most_one_cell_factor_container = FactorContainer<at_most_one_cell_factor, FMC, 1, false>;
+  using at_most_one_cell_factor_container = FactorContainer<uniform_minorant_factor, FMC, 1, false>;
   using FactorList = meta::list<
     detection_factor_container,
     at_most_one_cell_factor_container>;
 
   using transition_message_container = MessageContainer<transition_message, 0, 0, message_passing_schedule::full, variableMessageNumber, variableMessageNumber, FMC, 0>;
-  using at_most_one_cell_message_container = MessageContainer<at_most_one_cell_message, 0, 1, message_passing_schedule::right, variableMessageNumber, variableMessageNumber, FMC, 1>;
+  using at_most_one_cell_message_container = MessageContainer<uniform_minorant_message, 0, 1, message_passing_schedule::right, variableMessageNumber, variableMessageNumber, FMC, 1>;
   using MessageList = meta::list<
     transition_message_container,
     at_most_one_cell_message_container>;
@@ -881,31 +748,59 @@ struct FMC_MY {
 
 using namespace LP_MP;
 
-void test_uniform_minorant()
+/*
+auto create_random_cost_functor()
 {
   std::random_device rd;
-  decltype(rd)::result_type seed = rd();
+  auto seed = rd();
   std::default_random_engine generator(seed);
   std::uniform_int_distribution<int> uniform(-200, 200);
-  auto r = [&generator, &uniform]() { return uniform(generator); };
+  auto x = [=]() { return uniform(generator); };
+}
+*/
+
+struct random_source
+{
+  random_source()
+  : uniform(-200, 200)
+  {
+    std::random_device rd;
+    generator = decltype(generator)(rd());
+  }
+
+  auto get()
+  {
+    return uniform(generator);
+  }
+
+  std::uniform_int_distribution<int> uniform;
+  std::default_random_engine generator;
+};
+
+void test_uniform_minorant()
+{
+  random_source r;
 
   Solver<LP<FMC_MY>, StandardVisitor> solver;
   auto& lp = solver.GetLP();
-  auto* f0 = lp.template add_factor<FMC_MY::detection_factor_container>(r(), r(), r(), 0, 0);
-  auto* f1 = lp.template add_factor<FMC_MY::detection_factor_container>(r(), r(), r(), 0, 0);
+  auto& ctor = solver.GetProblemConstructor<0>();
 
-#if 0
-  auto [f0_var] = f0->GetFactor()->export_variables();
-  auto [f1_var] = f1->GetFactor()->export_variables();
-  std::cout << print_container(f0_var) << " / " << print_container(f1_var) << std::endl;
-#endif
+  // TODO: call begin
+  ctor.set_number_of_timesteps(1);
+  ctor.add_detection_hypothesis(lp, 0, 0, r.get(), r.get(), r.get(), 0, 0, 0, 0);
+  ctor.add_detection_hypothesis(lp, 0, 1, r.get(), r.get(), r.get(), 0, 0, 0, 0);
 
-  auto* m0 = lp.template add_factor<FMC_MY::at_most_one_cell_factor_container>(2);
-  for (auto& x: std::get<0>(m0->GetFactor()->export_variables()))
-    x = r();
+  std::array<std::array<INDEX, 2>, 2> exclusions;
+  exclusions[0] = {0, 0};
+  exclusions[1] = {0, 1};
+  ctor.add_exclusion_constraint(lp, exclusions.begin(), exclusions.end());
+  ctor.end(lp);
 
-  lp.template add_message<FMC_MY::at_most_one_cell_message_container>(f0, m0, 0);
-  lp.template add_message<FMC_MY::at_most_one_cell_message_container>(f1, m0, 1);
+  // TODO: Why it only works Anisotropic2?
+  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
+  ctor.fix_omegas();
+
+  ctor.output_graphviz(lp, "graph.dot");
 
   lp.Begin();
   lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
@@ -922,30 +817,24 @@ void test_uniform_minorant()
 
 void test_transition_normal()
 {
-  std::random_device rd;
-  decltype(rd)::result_type seed = rd();
-  std::default_random_engine generator(seed);
-  std::uniform_int_distribution<int> uniform(-200, 200);
-  auto r = [&generator, &uniform]() { return uniform(generator); };
+  random_source r;
 
   Solver<LP<FMC_MY>, StandardVisitor> solver;
   auto& lp = solver.GetLP();
-  auto* f0 = lp.template add_factor<FMC_MY::detection_factor_container>(r(), r(), r(), 0, 1);
-  auto* f1 = lp.template add_factor<FMC_MY::detection_factor_container>(r(), r(), r(), 1, 0);
-  f0->GetFactor()->dual_outgoing(0) = r();
-  f1->GetFactor()->dual_incoming(0) = r();
+  auto& ctor = solver.GetProblemConstructor<0>();
 
-#if 0
-  auto [f0_var] = f0->GetFactor()->export_variables();
-  auto [f1_var] = f1->GetFactor()->export_variables();
-  std::cout << seed << " / " << print_container(f0_var) << " / " << print_container(f1_var) << std::endl;
-#endif
+  // TODO: call begin
+  ctor.set_number_of_timesteps(2);
+  ctor.add_detection_hypothesis(lp, 0, 0, r.get(), r.get(), r.get(), 0, 0, 1, 0);
+  ctor.add_detection_hypothesis(lp, 1, 0, r.get(), r.get(), r.get(), 1, 0, 0, 0);
+  ctor.add_cell_transition(lp, 0, 0, 1, 0, r.get());
+  ctor.end(lp);
 
-  lp.template add_message<FMC_MY::transition_message_container>(f0, f1, false, 0, 0);
-  lp.AddFactorRelation(f0, f1);
+  lp.set_reparametrization(LPReparametrizationMode::Anisotropic);
+  ctor.fix_omegas();
 
   lp.Begin();
-  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
+  lp.set_reparametrization(LPReparametrizationMode::Anisotropic);
   for (int i = 0; i < 100; ++i) {
     REAL before_lb = lp.LowerBound();
     if (i % 2 == 0)
@@ -957,6 +846,7 @@ void test_transition_normal()
   }
 }
 
+#if 0
 void test_transition_split()
 {
   std::random_device rd;
@@ -998,21 +888,27 @@ void test_transition_split()
     assert(before_lb <= after_lb + eps);
   }
 }
+#endif
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv)
+{
 
-#ifndef NDEBUG
-  std::cout << "test_uniform_minorant" << std::endl;
-  for (int i = 0; i < 10000; ++i)
-    test_uniform_minorant();
-
+#if 0
   std::cout << "test_transition_normal" << std::endl;
   for (int i = 0; i < 10000; ++i)
     test_transition_normal();
+#endif
 
+  /*
   std::cout << "test_transition_split" << std::endl;
   for (int i = 0; i < 10000; ++i)
     test_transition_normal();
+  */
+
+#if 0
+  std::cout << "test_uniform_minorant" << std::endl;
+  for (int i = 0; i < 10000; ++i)
+    test_uniform_minorant();
 #endif
 
   std::cout << "start!" << std::endl;

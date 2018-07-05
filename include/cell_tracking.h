@@ -32,6 +32,27 @@ struct FMC_CELL_TRACKING {
   using ProblemDecompositionList = meta::list<constructor>; 
 };
 
+#if 0
+struct FMC_CELL_TRACKING_UNIFORM_MINORANT {
+  constexpr static const char* name = "Cell tracking (uniform minorant)";
+
+  using detection_factor_container = FactorContainer<detection_factor, FMC_CELL_TRACKING, 0, true>;
+  using at_most_one_hypothesis_container = FactorContainer<uniform_minorant_factor, FMC_CELL_TRACKING, 1, false>;
+  using FactorList = meta::list<detection_factor_container, at_most_one_hypothesis_container>;
+
+  using transition_message_container = MessageContainer<transition_message, 0, 0, message_passing_schedule::full, variableMessageNumber, variableMessageNumber, FMC_CELL_TRACKING, 0, 4, 4>;
+  using at_most_one_cell_message_container = MessageContainer<uniform_minorant_message, 0, 1, message_passing_schedule::right, variableMessageNumber, variableMessageNumber, FMC_CELL_TRACKING, 1, 3, 3>;
+  using MessageList = meta::list<transition_message_container, at_most_one_cell_message_container>;
+
+  using base_constructor = basic_cell_tracking_constructor<detection_factor_container>;
+  using exclusion_constructor = cell_tracking_exclusion_constructor<base_constructor, at_most_one_hypothesis_container, at_most_one_cell_message_container>;
+  using transition_constructor = transition_message_cell_tracking_constructor<exclusion_constructor, transition_message_container>;
+  using constructor = cell_tracking_constructor<transition_constructor>;
+
+  using ProblemDecompositionList = meta::list<constructor>;
+};
+#endif
+
 struct FMC_CELL_TRACKING_FLOW {
   constexpr static const char* name = "Cell tracking";
 
