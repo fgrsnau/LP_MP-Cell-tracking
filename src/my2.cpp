@@ -20,323 +20,6 @@ enum class direction { forward, backword };
 
 enum class dual_selector { detection, appearance, disappearance, incoming, outgoing, size };
 
-#if 0
-class detection_factor {
-public:
-  detection_factor(REAL detection_cost, REAL appearance_cost, REAL disappearance_cost, INDEX no_incoming, INDEX no_outgoing)
-  : no_incoming_(no_incoming)
-  , no_outgoing_(no_outgoing)
-  , duals_(dual_idx<dual_selector::size>(0))
-  {
-    dual_detection() = detection_cost;
-    dual_appearance() = appearance_cost;
-    dual_disappearance() = disappearance_cost;
-  }
-
-  void init_primal() { }
-
-  REAL LowerBound() const {
-    return std::min(min_detection(), 0.0);
-  }
-
-  REAL EvaluatePrimal() const {
-    return 0;
-  }
-
-  template<typename ARCHIVE>
-  void serialize_primal(ARCHIVE& a) { }
-
-  template<typename ARCHIVE>
-  void serialize_dual(ARCHIVE& a) { a(duals_); }
-
-  auto export_variables() { return std::tie(duals_); }
-
-  template<typename SOLVER>
-  void construct_constraints(SOLVER& s, typename SOLVER::vector& v) const
-  {
-    std::vector<typename SOLVER::variable> incoming_variables;
-    incoming_variables.push_back(v[dual_idx<dual_selector::appearance>(0)]);
-    for (INDEX i = 0; i < no_incoming_; ++i)
-      incoming_variables.push_back(v[dual_idx<dual_selector::incoming>(i)]);
-
-    std::vector<typename SOLVER::variable> outgoing_variables;
-    outgoing_variables.push_back(v[dual_idx<dual_selector::disappearance>(0)]);
-    for (INDEX i = 0; i < no_outgoing_; ++i)
-      incoming_variables.push_back(v[dual_idx<dual_selector::outgoing>(i)]);
-
-    auto incoming_sum = s.add_at_most_one_constraint(incoming_variables.begin(), incoming_variables.end());
-    auto outgoing_sum = s.add_at_most_one_constraint(outgoing_variables.begin(), outgoing_variables.end());
-
-    s.make_equal(v[dual_idx<dual_selector::detection>(0)], incoming_sum);
-    s.make_equal(v[dual_idx<dual_selector::detection>(0)], outgoing_sum);
-  }
-
-  template<typename SOLVER>
-  void convert_primal(SOLVER& s, typename SOLVER::vector& v) { }
-
-  REAL min_incoming() const
-  {
-    REAL x = dual_appearance();
-    for (INDEX i = 0; i < no_incoming_; ++i)
-      x = std::min(x, dual_incoming(i));
-    return x;
-  };
-
-  REAL min_marginal_incoming(const INDEX i) const
-  {
-    return dual_detection() + min_outgoing() + dual_incoming(i);
-  }
-
-  REAL min_outgoing() const
-  {
-    REAL x = dual_disappearance();
-    for (INDEX i = 0; i < no_outgoing_; ++i)
-      x = std::min(x, dual_outgoing(i));
-    return x;
-  }
-
-  REAL min_marginal_outgoing(const INDEX i) const {
-    return dual_detection() + min_incoming() + dual_outgoing(i);
-  }
-
-  REAL min_detection() const {
-    return min_incoming() + dual_detection() + min_outgoing();
-  }
-
-  REAL min_marginal_detection() const { return min_detection(); }
-
-  const REAL& dual_detection() const { return duals_[dual_idx<dual_selector::detection>(0)]; }
-  const REAL& dual_appearance() const { return duals_[dual_idx<dual_selector::appearance>(0)]; }
-  const REAL& dual_disappearance() const { return duals_[dual_idx<dual_selector::disappearance>(0)]; }
-  const REAL& dual_incoming(INDEX i) const { return duals_[dual_idx<dual_selector::incoming>(i)]; }
-  const REAL& dual_outgoing(INDEX i) const { return duals_[dual_idx<dual_selector::outgoing>(i)]; }
-
-  REAL& dual_detection() { return duals_[dual_idx<dual_selector::detection>(0)]; }
-  REAL& dual_appearance() { return duals_[dual_idx<dual_selector::appearance>(0)]; }
-  REAL& dual_disappearance() { return duals_[dual_idx<dual_selector::disappearance>(0)]; }
-  REAL& dual_incoming(INDEX i) { return duals_[dual_idx<dual_selector::incoming>(i)]; }
-  REAL& dual_outgoing(INDEX i) { return duals_[dual_idx<dual_selector::outgoing>(i)]; }
-
-protected:
-  template<dual_selector SELECTOR>
-  size_t dual_idx(INDEX i) const {
-    assert(i >= 0);
-    size_t offset = 0;
-    if constexpr (SELECTOR == dual_selector::detection) {
-      assert(i == 0);
-      return offset;
-    }
-    offset += 1;
-
-    if constexpr (SELECTOR == dual_selector::appearance) {
-      assert(i == 0);
-      return offset;
-    }
-    offset += 1;
-
-    if constexpr (SELECTOR == dual_selector::disappearance) {
-      assert(i == 0);
-      return offset;
-    }
-    offset += 1;
-
-    if constexpr (SELECTOR == dual_selector::incoming) {
-      assert(i < no_incoming_);
-      return offset + i;
-    }
-    offset += no_incoming_;
-
-    if constexpr (SELECTOR == dual_selector::outgoing) {
-      assert(i < no_outgoing_);
-      return offset + i;
-    }
-    offset += no_outgoing_;
-
-    if constexpr (SELECTOR == dual_selector::size) {
-      return offset;
-    }
-  };
-
-  INDEX no_incoming_;
-  INDEX no_outgoing_;
-
-  vector<REAL> duals_;
-
-  friend class transition_message;
-  friend class at_most_one_cell_message;
-};
-
-class at_most_one_cell_factor {
-public:
-  at_most_one_cell_factor(INDEX no_neighbors)
-  : constant_(0)
-  , duals_(no_neighbors)
-  { }
-
-  void init_primal() { }
-
-  REAL LowerBound() const {
-    return std::min(duals_.min(), 0.0) + constant_;
-  }
-
-  REAL EvaluatePrimal() const {
-    return 0;
-  }
-
-  void MaximizePotential() {
-#ifndef NDEBUG
-    std::vector<REAL> old(duals_.begin(), duals_.end());
-    for (auto& x : old) x += constant_;
-#endif
-
-    auto argmin1 = std::min_element(duals_.begin(), duals_.end());
-    auto min1 = *argmin1;
-    *argmin1 = std::numeric_limits<REAL>::infinity();
-    auto argmin2 = std::min_element(duals_.begin(), duals_.end());
-    auto min2 = *argmin2;
-    auto diff_over_two = min2 - min1 / 2.0;
-
-    constant_ += min1 + diff_over_two;
-    *argmin1 = - diff_over_two;
-    *argmin2 = diff_over_two;
-
-    for (auto it = duals_.begin(); it != duals_.end(); ++it)
-      if (it != argmin1 && it != argmin2)
-        *it -= min1 + diff_over_two;
-
-#ifndef NDEBUG
-    for (INDEX i = 0; i < duals_.size(); ++i)
-      assert(std::abs(duals_[i] + constant_ - old[i]) < eps);
-#endif
-  }
-
-  void MaximizePotentialAndComputePrimal() {
-    MaximizePotential();
-  }
-
-  template<typename ARCHIVE>
-  void serialize_primal(ARCHIVE& a) { }
-
-  template<typename ARCHIVE>
-  void serialize_dual(ARCHIVE& a) { a(duals_); }
-
-  auto export_variables() { return std::tie(duals_); }
-
-  template<typename SOLVER>
-  void construct_constraints(SOLVER& s, typename SOLVER::vector& v) const { }
-
-  template<typename SOLVER>
-  void convert_primal(SOLVER& s, typename SOLVER::vector& v) { }
-
-protected:
-  REAL constant_;
-  vector<REAL> duals_;
-
-  friend class transition_message;
-  friend class at_most_one_cell_message;
-};
-
-class transition_message {
-public:
-  transition_message(bool split, INDEX from, INDEX to)
-  : split_(split)
-  , from_(from)
-  , to_(to)
-  {
-  }
-
-  template<typename LEFT_FACTOR, typename G2>
-  void send_message_to_right(LEFT_FACTOR& l, G2& msg, const REAL omega)
-  {
-    assert(from_ >= 0 && from_ < l.no_outgoing_);
-    msg[0] -= omega * l.min_marginal_outgoing(from_);
-  }
-
-  template<typename RIGHT_FACTOR, typename G2>
-  void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
-  {
-    assert(to_ >= 0 && to_ < r.no_incoming_);
-    msg[0] -= omega * r.min_marginal_outgoing(to_);
-  }
-
-  template<typename LEFT_FACTOR>
-  void RepamLeft(LEFT_FACTOR& l, const REAL msg, const INDEX msg_dim)
-  {
-    assert(msg_dim == 0);
-    l.dual_outgoing(from_) += msg;
-  }
-
-  template<typename RIGHT_FACTOR>
-  void RepamRight(RIGHT_FACTOR& r, const REAL msg, const INDEX msg_dim)
-  {
-    assert(msg_dim == 0);
-    r.dual_incoming(to_) += msg;
-  }
-
-  template<typename SOLVER, typename LEFT_FACTOR, typename RIGHT_FACTOR>
-  void construct_constraints(SOLVER& s,
-    LEFT_FACTOR& left, typename SOLVER::vector& v1,
-    RIGHT_FACTOR& right, typename SOLVER::vector& v2) const
-  {
-    s.make_equal(
-      v1[left.template dual_idx<dual_selector::outgoing>(from_)],
-      v2[right.template dual_idx<dual_selector::incoming>(to_)]
-    );
-  }
-
-protected:
-  bool split_;
-  INDEX from_;
-  INDEX to_;
-};
-
-class at_most_one_cell_message {
-public:
-  at_most_one_cell_message(INDEX index)
-  : index_(index)
-  { }
-
-  template<typename LEFT_FACTOR, typename G2>
-  void send_message_to_right(LEFT_FACTOR& l, G2& msg, const REAL omega)
-  {
-    assert(std::abs(omega - 1) < eps);
-    msg[0] -= l.min_marginal_detection();
-  }
-
-  template<typename RIGHT_FACTOR, typename G2>
-  void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
-  {
-    std::cout << __PRETTY_FUNCTION__ << "\n" << omega << " / " << r.duals_.size() << std::endl;
-    assert(index_ >= 0 && index_ < r.duals_.size());
-    assert(std::abs(omega * r.duals_.size() - 1) < eps);
-    msg[0] -= r.duals_[index_];
-  }
-
-  template<typename LEFT_FACTOR>
-  void RepamLeft(LEFT_FACTOR& l, const REAL msg, const INDEX msg_dim)
-  {
-    assert(msg_dim == 0);
-    l.dual_detection() += msg;
-  }
-
-  template<typename RIGHT_FACTOR>
-  void RepamRight(RIGHT_FACTOR& r, const REAL msg, const INDEX msg_dim)
-  {
-    assert(msg_dim == 0);
-    assert(index_ >= 0 && index_ < r.duals_.size());
-    r.duals_[index_] += msg;
-  }
-
-  template<typename SOLVER, typename LEFT_FACTOR, typename RIGHT_FACTOR>
-  void construct_constraints(SOLVER& s,
-    LEFT_FACTOR& left, typename SOLVER::vector& v1,
-    RIGHT_FACTOR& right, typename SOLVER::vector& v2) const { }
-
-protected:
-  INDEX index_;
-};
-#endif
-
 template<typename FMC_T>
 class my_tracking_constructor {
 public:
@@ -346,19 +29,6 @@ public:
   using at_most_one_cell_factor_container = typename FMC::at_most_one_cell_factor_container;
   using transition_message_container = typename FMC::transition_message_container;
   using at_most_one_cell_message_container = typename FMC::at_most_one_cell_message_container;
-
-  constexpr bool accept(INDEX timestep, INDEX hypothesis_id)
-  {
-#if 0
-    if (! (timestep >= 0 && timestep <= 1))
-      return false;
-
-    if (! (hypothesis_id >= 0 && hypothesis_id <= 1))
-      return false;
-#endif
-
-    return true;
-  }
 
   template<typename SOLVER>
   my_tracking_constructor(SOLVER& solver)
@@ -378,9 +48,6 @@ public:
     const INDEX no_incoming_transitions, const INDEX no_incoming_divisions,
     const INDEX no_outgoing_transitions, const INDEX no_outgoing_divisions)
   {
-    if (!accept(timestep, hypothesis_id))
-      return;
-
     assert(timestep < detections_.size());
     if (hypothesis_id >= detections_[timestep].size())
       detections_[timestep].resize(hypothesis_id+1);
@@ -404,9 +71,6 @@ public:
     const INDEX timestep_next, const INDEX hypothesis_next,
     const REAL cost)
   {
-    if (!accept(timestep_prev, hypothesis_prev) || !accept(timestep_next, hypothesis_next))
-      return;
-
     auto* factor_prev = detections_[timestep_prev][hypothesis_prev];
     auto& counters_prev = factor_counters_[factor_prev];
 
@@ -426,9 +90,6 @@ public:
     const INDEX timestep_next_2, const INDEX hypothesis_next_2,
     const REAL cost)
   {
-    if (!accept(timestep_prev, hypothesis_prev) || !accept(timestep_next_1, hypothesis_next_1) || !accept(timestep_next_2, hypothesis_next_2))
-      return;
-
     auto* factor_prev = detections_[timestep_prev][hypothesis_prev];
     auto& counters_prev = factor_counters_[factor_prev];
 
@@ -451,10 +112,6 @@ public:
   template<typename ITERATOR>
   void add_exclusion_constraint(LP<FMC>& lp, ITERATOR begin, ITERATOR end) // iterator points to std::array<INDEX,2>
   {
-    for (auto it = begin; it != end; ++it)
-      if (!accept(it->operator[](0), it->operator[](1)))
-        return;
-
     const INDEX timestep = (*begin)[0];
     exclusions_[timestep].emplace_back();
     auto& exclusion = exclusions_[timestep].back();
@@ -500,6 +157,11 @@ public:
       assert(x.second.no_incoming_division_edges == x.second.incoming_division_edge_count);
       assert(x.second.no_outgoing_transition_edges == x.second.outgoing_transition_edge_count);
       assert(x.second.no_outgoing_division_edges == x.second.outgoing_division_edge_count);
+    }
+
+    for (auto x : {LPReparametrizationMode::Anisotropic, LPReparametrizationMode::Anisotropic2}) {
+      lp.set_reparametrization(x);
+      fix_omegas();
     }
   }
 
@@ -748,47 +410,26 @@ struct FMC_MY {
 
 using namespace LP_MP;
 
-/*
 auto create_random_cost_functor()
 {
   std::random_device rd;
   auto seed = rd();
   std::default_random_engine generator(seed);
   std::uniform_int_distribution<int> uniform(-200, 200);
-  auto x = [=]() { return uniform(generator); };
+  return [=]() mutable { return uniform(generator); };
 }
-*/
-
-struct random_source
-{
-  random_source()
-  : uniform(-200, 200)
-  {
-    std::random_device rd;
-    generator = decltype(generator)(rd());
-  }
-
-  auto get()
-  {
-    return uniform(generator);
-  }
-
-  std::uniform_int_distribution<int> uniform;
-  std::default_random_engine generator;
-};
 
 void test_uniform_minorant()
 {
-  random_source r;
+  auto r = create_random_cost_functor();
 
   Solver<LP<FMC_MY>, StandardVisitor> solver;
   auto& lp = solver.GetLP();
   auto& ctor = solver.GetProblemConstructor<0>();
 
-  // TODO: call begin
   ctor.set_number_of_timesteps(1);
-  ctor.add_detection_hypothesis(lp, 0, 0, r.get(), r.get(), r.get(), 0, 0, 0, 0);
-  ctor.add_detection_hypothesis(lp, 0, 1, r.get(), r.get(), r.get(), 0, 0, 0, 0);
+  ctor.add_detection_hypothesis(lp, 0, 0, r(), r(), r(), 0, 0, 0, 0);
+  ctor.add_detection_hypothesis(lp, 0, 1, r(), r(), r(), 0, 0, 0, 0);
 
   std::array<std::array<INDEX, 2>, 2> exclusions;
   exclusions[0] = {0, 0};
@@ -796,14 +437,8 @@ void test_uniform_minorant()
   ctor.add_exclusion_constraint(lp, exclusions.begin(), exclusions.end());
   ctor.end(lp);
 
-  // TODO: Why it only works Anisotropic2?
-  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
-  ctor.fix_omegas();
-
-  ctor.output_graphviz(lp, "graph.dot");
-
   lp.Begin();
-  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
+  lp.set_reparametrization(LPReparametrizationMode::Anisotropic);
   for (int i = 0; i < 100; ++i) {
     REAL before_lb = lp.LowerBound();
     if (i % 2 == 0)
@@ -817,21 +452,17 @@ void test_uniform_minorant()
 
 void test_transition_normal()
 {
-  random_source r;
+  auto r = create_random_cost_functor();
 
   Solver<LP<FMC_MY>, StandardVisitor> solver;
   auto& lp = solver.GetLP();
   auto& ctor = solver.GetProblemConstructor<0>();
 
-  // TODO: call begin
   ctor.set_number_of_timesteps(2);
-  ctor.add_detection_hypothesis(lp, 0, 0, r.get(), r.get(), r.get(), 0, 0, 1, 0);
-  ctor.add_detection_hypothesis(lp, 1, 0, r.get(), r.get(), r.get(), 1, 0, 0, 0);
-  ctor.add_cell_transition(lp, 0, 0, 1, 0, r.get());
+  ctor.add_detection_hypothesis(lp, 0, 0, r(), r(), r(), 0, 0, 1, 0);
+  ctor.add_detection_hypothesis(lp, 1, 0, r(), r(), r(), 1, 0, 0, 0);
+  ctor.add_cell_transition(lp, 0, 0, 1, 0, r());
   ctor.end(lp);
-
-  lp.set_reparametrization(LPReparametrizationMode::Anisotropic);
-  ctor.fix_omegas();
 
   lp.Begin();
   lp.set_reparametrization(LPReparametrizationMode::Anisotropic);
@@ -846,38 +477,23 @@ void test_transition_normal()
   }
 }
 
-#if 0
 void test_transition_split()
 {
-  std::random_device rd;
-  decltype(rd)::result_type seed = rd();
-  std::default_random_engine generator(seed);
-  std::uniform_int_distribution<int> uniform(-200, 200);
-  auto r = [&generator, &uniform]() { return uniform(generator); };
+  auto r = create_random_cost_functor();
 
   Solver<LP<FMC_MY>, StandardVisitor> solver;
   auto& lp = solver.GetLP();
-  auto* f0 = lp.template add_factor<FMC_MY::detection_factor_container>(r(), r(), r(), 0, 1);
-  auto* f1 = lp.template add_factor<FMC_MY::detection_factor_container>(r(), r(), r(), 1, 0);
-  auto* f2 = lp.template add_factor<FMC_MY::detection_factor_container>(r(), r(), r(), 1, 0);
-  f0->GetFactor()->dual_outgoing(0) = r();
-  f1->GetFactor()->dual_incoming(0) = r();
-  f2->GetFactor()->dual_incoming(0) = r();
+  auto& ctor = solver.GetProblemConstructor<0>();
 
-#if 1
-  auto [f0_var] = f0->GetFactor()->export_variables();
-  auto [f1_var] = f1->GetFactor()->export_variables();
-  auto [f2_var] = f2->GetFactor()->export_variables();
-  std::cout << seed << " / " << print_container(f0_var) << " / " << print_container(f1_var) << " / " << print_container(f2_var) << std::endl;
-#endif
-
-  lp.template add_message<FMC_MY::transition_message_container>(f0, f1, true, 0, 0);
-  lp.template add_message<FMC_MY::transition_message_container>(f0, f2, true, 0, 0);
-  lp.AddFactorRelation(f0, f1);
-  lp.AddFactorRelation(f0, f2);
+  ctor.set_number_of_timesteps(2);
+  ctor.add_detection_hypothesis(lp, 0, 0, r(), r(), r(), 0, 0, 0, 1);
+  ctor.add_detection_hypothesis(lp, 1, 0, r(), r(), r(), 0, 1, 0, 0);
+  ctor.add_detection_hypothesis(lp, 1, 1, r(), r(), r(), 0, 1, 0, 0);
+  ctor.add_cell_division(lp, 0, 0, 1, 0, 1, 1, r());
+  ctor.end(lp);
 
   lp.Begin();
-  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
+  lp.set_reparametrization(LPReparametrizationMode::Anisotropic);
   for (int i = 0; i < 100; ++i) {
     REAL before_lb = lp.LowerBound();
     if (i % 2 == 0)
@@ -888,57 +504,26 @@ void test_transition_split()
     assert(before_lb <= after_lb + eps);
   }
 }
-#endif
 
 int main(int argc, char** argv)
 {
-
-#if 0
-  std::cout << "test_transition_normal" << std::endl;
+#ifndef NDEBUG
   for (int i = 0; i < 10000; ++i)
     test_transition_normal();
-#endif
 
-  /*
-  std::cout << "test_transition_split" << std::endl;
   for (int i = 0; i < 10000; ++i)
-    test_transition_normal();
-  */
+    test_transition_split();
 
-#if 0
-  std::cout << "test_uniform_minorant" << std::endl;
   for (int i = 0; i < 10000; ++i)
     test_uniform_minorant();
 #endif
 
-  std::cout << "start!" << std::endl;
   using BaseSolver = Solver<LP<FMC_MY>, StandardVisitor>;
   BaseSolver solver(argc, argv);
   solver.ReadProblem(cell_tracking_parser_2d::ParseProblem<BaseSolver>);
   auto& lp = solver.GetLP();
 
-  lp.set_reparametrization(LPReparametrizationMode::Anisotropic);
-  solver.GetProblemConstructor<0>().fix_omegas();
+  //solver.GetProblemConstructor<0>().output_graphviz(solver.GetLP(), "graph.dot");
 
-  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
-  solver.GetProblemConstructor<0>().fix_omegas();
-
-#ifndef NDEBUG
-  solver.GetProblemConstructor<0>().output_graphviz(solver.GetLP(), "graph.dot");
-#endif
-
-#if 0
-  lp.Begin();
-  lp.set_reparametrization(LPReparametrizationMode::Anisotropic2);
-  std::cout << lp.LowerBound() << std::endl;
-  lp.ComputeForwardPass();
-  solver.GetProblemConstructor<0>().output_graphviz(solver.GetLP(), "graph.dot");
-  std::cout << lp.LowerBound() << std::endl;
-
-  //lp.ComputeBackwardPass();
-
-#else
   solver.Solve();
-#endif
 }
-
