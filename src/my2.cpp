@@ -13,12 +13,7 @@
 
 namespace LP_MP {
 
-template<typename CHECK> struct get_type;
-
 enum class direction { forward, backword };
-
-
-enum class dual_selector { detection, appearance, disappearance, incoming, outgoing, size };
 
 template<typename FMC_T>
 class my_tracking_constructor {

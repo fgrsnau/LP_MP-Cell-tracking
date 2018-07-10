@@ -8,26 +8,9 @@
 
 namespace LP_MP {
 
-template<typename T>
-void print_array_container(const vector<std::array<T,2>>& c)
-{
-  bool first = true;
-  std::cout << "[";
-  for (auto& x : c) {
-    if (!first)
-      std::cout << ", ";
-    std::cout << x[0] << ", " << x[1];
-    first = false;
-  }
-  std::cout << "]";
-}
-
+// Last element of duals is "dummy" variable and no potentials gets distributed there!
 vector<std::array<REAL,2>> uniform_minorant_generic(const vector<std::array<REAL,2>> &duals)
 {
-  if (debug()) {
-    std::cout << "duals = "; print_array_container(duals); std::cout << std::endl;
-  }
-
   const size_t dummy_index = duals.size() - 1;
   using minorant_type = vector<std::array<REAL,2>>;
 
@@ -71,9 +54,6 @@ vector<std::array<REAL,2>> uniform_minorant_generic(const vector<std::array<REAL
 
     const REAL& epsilon = min;
 
-    if (debug())
-      std::cout << "[MINORANT] iteration = " << iteration << "  ->  argmin = " << argmin << " / h_x = " << h_x << " / epsilon = " << epsilon << std::endl;
-
     for (INDEX i = 0; i < duals.size(); ++i) {
       for (bool on : {false, true}) {
         minorant[i][on] += epsilon * indicator[i][on];
@@ -83,12 +63,6 @@ vector<std::array<REAL,2>> uniform_minorant_generic(const vector<std::array<REAL
 
     for (INDEX i = 0; i < duals.size(); ++i)
       indicator[i][i == argmin] = 0;
-
-    if (debug()) {
-      std::cout << "indicator = "; print_array_container(indicator); std::cout << "\n";
-      std::cout << "f_minus_g = "; print_array_container(f_minus_g); std::cout << "\n";
-      std::cout << "minorant = "; print_array_container(minorant); std::cout << std::endl;
-    }
   }
 
 #ifndef NDEBUG
@@ -108,20 +82,13 @@ vector<std::array<REAL,2>> uniform_minorant_generic(const vector<std::array<REAL
 class uniform_minorant_factor {
 public:
   uniform_minorant_factor(INDEX no_neighbors)
-  : duals_(no_neighbors + 1)
-  {
-    for (auto& x : duals_)
-      x = {0, 0};
-  }
+  : duals_(no_neighbors, 0)
+  { }
 
   void init_primal() { }
 
   REAL LowerBound() const {
-    // FIXME
-    REAL minimum = std::numeric_limits<REAL>::infinity();
-    for (INDEX i = 0; i < duals_.size(); ++i)
-      minimum = std::min(minimum, compute(i));
-    return minimum;
+    return std::min(duals_.min(), 0.0);
   }
 
   REAL EvaluatePrimal() const {
@@ -142,18 +109,8 @@ public:
   template<typename SOLVER>
   void convert_primal(SOLVER& s /*, typename SOLVER::vector& v*/) { }
 
-  REAL compute(INDEX on) const
-  {
-    // FIXME: Remove this
-    assert(on >= 0); assert(on < duals_.size());
-    REAL sum = 0;
-    for (INDEX i = 0; i < duals_.size(); ++i)
-      sum += duals_[i][i == on ? 1 : 0];
-    return sum;
-  }
-
 protected:
-  vector<std::array<REAL,2>> duals_;
+  vector<REAL> duals_;
 
   friend class uniform_minorant_message;
 };
@@ -167,11 +124,6 @@ public:
   template<typename LEFT_FACTOR, typename G2>
   void send_message_to_right(LEFT_FACTOR& l, G2& msg, const REAL omega)
   {
-    /*
-    std::cout << __PRETTY_FUNCTION__ << std::endl;
-    std::cout << l.min_detection_cost() << std::endl;
-    */
-
     assert(std::abs(omega - 1) < eps);
     msg[0] -= l.min_detection_cost() * omega;
   }
@@ -179,20 +131,19 @@ public:
   template<typename RIGHT_FACTOR, typename MSG_ARRAY>
   static void SendMessagesToLeft(const RIGHT_FACTOR& r, MSG_ARRAY msg_begin, MSG_ARRAY msg_end, const REAL omega)
   {
-    auto minorant = uniform_minorant_generic(r.duals_);
     assert(std::abs(omega - 1) < eps);
-
-    //assert(std::distance(msg_begin, msg_end) == minorant.size() - 1);
 #ifndef NDEBUG
     size_t count = 0;
-    size_t idx_counter = 0;
-    for (auto msg_it = msg_begin; msg_it != msg_end; ++msg_it) {
+    for (auto msg_it = msg_begin; msg_it != msg_end; ++msg_it)
       ++count;
-      idx_counter += (*msg_it).GetMessageOp().index_;
-      }
-      assert(idx_counter == (minorant.size()-1)*(minorant.size()-2)/2);
-    assert(count == minorant.size() - 1);
+    assert(count == r.duals_.size());
 #endif
+
+    vector<std::array<REAL, 2>> lifted(r.duals_.size() + 1);
+    for (size_t i = 0; i < r.duals_.size(); ++i)
+      lifted[i] = {0, r.duals_[i]};
+    lifted.back() = {0, 0};
+    auto minorant = uniform_minorant_generic(lifted);
 
     size_t i = 0;
     for (auto msg_it = msg_begin; msg_it != msg_end; ++msg_it, ++i) {
@@ -204,14 +155,6 @@ public:
   void send_message_to_left(RIGHT_FACTOR& r, G2& msg, const REAL omega)
   {
     assert(false);
-
-    // TODO: Check this.
-#if 0
-    std::cout << __PRETTY_FUNCTION__ << "\n" << omega << " / " << r.duals_.size() << std::endl;
-    assert(index_ >= 0 && index_ < r.duals_.size());
-    assert(std::abs(omega * r.duals_.size() - 1) < eps);
-    msg[0] -= r.duals_[index_];
-#endif
   }
 
   template<typename LEFT_FACTOR>
@@ -226,11 +169,7 @@ public:
   {
     assert(msg_dim == 0);
     assert(index_ >= 0 && index_ < r.duals_.size() - 1);
-    /*
-    std::cout << "r.duals_[" << index_ << "][1] += " << msg << std::endl;
-    */
-    r.duals_[index_][1] += msg;
-    assert(r.duals_[index_][0] == 0);
+    r.duals_[index_] += msg;
   }
 
   template<typename SOLVER, typename LEFT_FACTOR, typename RIGHT_FACTOR>

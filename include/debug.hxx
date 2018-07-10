@@ -2,6 +2,8 @@
 
 namespace LP_MP {
 
+template<typename CHECK> struct get_type;
+
 template<class T>
 std::string demangled_name(T &object)
 {
