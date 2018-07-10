@@ -9,6 +9,8 @@
 namespace LP_MP {
 
 // Last element of duals is "dummy" variable and no potentials gets distributed there!
+//
+// FIXME: Compute uniform minorant more efficiently.
 vector<std::array<REAL,2>> uniform_minorant_generic(const vector<std::array<REAL,2>> &duals)
 {
   const size_t dummy_index = duals.size() - 1;
@@ -139,6 +141,7 @@ public:
     assert(count == r.duals_.size());
 #endif
 
+    // FIXME: Get rid of lifting.
     vector<std::array<REAL, 2>> lifted(r.duals_.size() + 1);
     for (size_t i = 0; i < r.duals_.size(); ++i)
       lifted[i] = {0, r.duals_[i]};

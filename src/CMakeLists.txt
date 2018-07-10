@@ -1,13 +1,12 @@
 SET(SOURCE_FILES
-  my.cpp
-  my2.cpp
-  cell_tracking_mother_machine.cpp 
-  cell_tracking_with_division_distance.cpp
-  cell_tracking.cpp 
-  cell_tracking_flow.cpp 
-  cell_tracking_division_distance_duplicate_edges.cpp 
-  cell_tracking_duplicate_edges.cpp 
+  cell_tracking.cpp
+  cell_tracking_division_distance_duplicate_edges.cpp
+  cell_tracking_duplicate_edges.cpp
   cell_tracking_fine_decomposition.cpp
+  cell_tracking_flow.cpp
+  cell_tracking_mother_machine.cpp
+  cell_tracking_uniform_minorant.cpp
+  cell_tracking_with_division_distance.cpp
   )
 
 foreach( source_file ${SOURCE_FILES} )
