@@ -1,8 +1,10 @@
 #ifndef LP_MP_DETECTION_FACTOR_HXX
 #define LP_MP_DETECTION_FACTOR_HXX
 
-#include "config.hxx"
 #include <bitset>
+
+#include "config.hxx"
+#include "debug.hxx"
 #include "vector.hxx"
 #include "sat_solver.hxx"
 
@@ -21,6 +23,7 @@ class detection_factor {
 
   friend class transition_message;
   friend class at_most_one_cell_message;
+  friend class uniform_minorant_message;
   template<exit_constraint_position POSITION> friend class exit_constraint_message;
 
 public:
@@ -36,7 +39,9 @@ public:
       incoming(no_incoming_transition_edges + no_incoming_division_edges + 1, 0.0),
       outgoing(no_outgoing_transition_edges + no_outgoing_division_edges + 1, 0.0),
       min_incoming_dirty_(true),
-      min_outgoing_dirty_(true)
+      min_outgoing_dirty_(true),
+      incoming_edge_active_(no_incoming_transition_edges + no_incoming_division_edges + 1, 0),
+      outgoing_edge_active_(no_outgoing_transition_edges + no_outgoing_division_edges + 1, 0)
   {
       std::fill(incoming.begin(), incoming.end(), std::numeric_limits<REAL>::infinity());
       std::fill(outgoing.begin(), outgoing.end(), std::numeric_limits<REAL>::infinity());
@@ -57,52 +62,74 @@ public:
     assert(outgoing.size() > 0);
     return detection + min_incoming() + min_outgoing();
   }
-  
-  void MaximizePotentialAndComputePrimal() 
+
+  void MaximizePotentialAndComputePrimal()
   {
-    if(incoming_edge_ < incoming.size() && outgoing_edge_ < outgoing.size()) {
+    WHERE_AM_I
+    assert(incoming.size() > 0);
+    assert(outgoing.size() > 0);
+
+    // Primals already set, don't do anyhing.
+    if ((incoming_edge_ < incoming.size() && outgoing_edge_ < outgoing.size()) ||
+        (incoming_edge_ == no_edge_taken && outgoing_edge_ == no_edge_taken))
       return;
-    }
-    if(incoming_edge_ == no_edge_taken && incoming.size() > 0) {
-      outgoing_edge_ = no_edge_taken;
-      return;
-    }
-    if(outgoing_edge_ == no_edge_taken && outgoing.size() > 0) {
+
+    auto active_argmin = [](auto& costs, auto& active) {
+      assert(costs.size() == active.size());
+      INDEX argmin = no_edge_taken;
+      REAL min = std::numeric_limits<REAL>::infinity();
+      for (INDEX i = 0; i < costs.size(); ++i) {
+        if (active[i]) {
+          const REAL& current = costs[i];
+          if (current < min) {
+            min = current;
+            argmin = i;
+          }
+        }
+      }
+      return argmin;
+    };
+
+    // Get best primal labeling out of still active connections under the
+    // assumption that the detection is actually enabled.
+    INDEX incoming_argmin = active_argmin(incoming, incoming_edge_active_);
+    INDEX outgoing_argmin = active_argmin(outgoing, outgoing_edge_active_);
+
+    if (incoming_edge_ < incoming.size()) {
+      // Incoming edge already labeled, detections can't be off.
+      assert(outgoing_argmin != no_edge_taken); // Would mean a conflict occured!
+      outgoing_edge_ = outgoing_argmin;
+    } else if (outgoing_edge_ < outgoing.size()) {
+      // Outgoing edge already labeled, detections can't be off.
+      assert(incoming_argmin != no_edge_taken); // Would mean a conflict occured!
+      incoming_edge_ = incoming_argmin;
+    } else if (incoming_argmin == no_edge_taken || outgoing_argmin == no_edge_taken) {
       incoming_edge_ = no_edge_taken;
-      return;
+      outgoing_edge_ = no_edge_taken;
+    } else {
+      // No edge labeled yet, detection could be off.
+      REAL lb = detection + incoming[incoming_argmin] + outgoing[outgoing_argmin];
+      if (lb < 0.0) {
+        incoming_edge_ = incoming_argmin;
+        outgoing_edge_ = outgoing_argmin;
+      } else {
+        incoming_edge_ = no_edge_taken;
+        outgoing_edge_ = no_edge_taken;
+      }
     }
 
-    INDEX incoming_cand = no_edge_taken;
-    REAL lb = detection;
-    if(incoming.size() > 0) {
-      incoming_cand = std::min_element(incoming.begin(), incoming.end()) - incoming.begin();
-      lb += incoming[incoming_cand]; 
-    }
-    INDEX outgoing_cand = no_edge_taken;
-    if(outgoing.size() > 0) {
-      outgoing_cand = std::min_element(outgoing.begin(), outgoing.end()) - outgoing.begin();
-      lb += outgoing[outgoing_cand]; 
-    }
-    // one edge already labelled
-    if(incoming_edge_ < incoming.size() && outgoing.size() > 0 && outgoing_edge_ == no_primal_decision) {
-      assert(outgoing_edge_ == no_primal_decision);
-      outgoing_edge_ = outgoing_cand;
-      return;
-    } else if(outgoing_edge_ < outgoing.size() && incoming.size() > 0 && incoming_edge_ == no_primal_decision) {
-      assert(incoming_edge_ == no_primal_decision);
-      incoming_edge_ = incoming_cand;
-      return;
-    }
-    // no edge labelled yet
-    if(lb < 0.0) {
-      incoming_edge_ = incoming_cand;
-      outgoing_edge_ = outgoing_cand;
-      return;
-    } else {
-      incoming_edge_ = no_edge_taken;
-      outgoing_edge_ = no_edge_taken;
-    }
+    // Update active edges to possibly occured decisions.
+    auto update_active = [](auto& edge, auto& active) {
+      if (edge <= no_edge_taken) {
+        std::fill(active.begin(), active.end(), 0);
+        if (edge < active.size())
+          active[edge] = 1;
+      }
+    };
+    update_active(incoming_edge_, incoming_edge_active_);
+    update_active(outgoing_edge_, outgoing_edge_active_);
   }
+
   REAL LowerBound() const {
       // check whether every entry has been set
       //std::cout << detection << "; ";
@@ -130,10 +157,13 @@ public:
   REAL EvaluatePrimal() const {
     assert(incoming.size() > 0);
     assert(outgoing.size() > 0);
-    if(incoming_edge_ < incoming.size() && outgoing_edge_ < outgoing.size()) {
+
+    if (incoming_edge_ < incoming.size() && outgoing_edge_ < outgoing.size()) {
       return detection + incoming[incoming_edge_] + outgoing[outgoing_edge_];
-    } else {
+    } else if (incoming_edge_ == no_edge_taken && outgoing_edge_ == no_edge_taken) {
       return 0.0;
+    } else {
+      return std::numeric_limits<REAL>::infinity();
     }
   }
 
@@ -165,9 +195,12 @@ public:
   INDEX size() const { return 1 + incoming.size() + outgoing.size(); }
 
   void init_primal() 
-  { 
+  {
+    WHERE_AM_I
     incoming_edge_ = no_primal_decision;
     outgoing_edge_ = no_primal_decision; 
+    std::fill(incoming_edge_active_.begin(), incoming_edge_active_.end(), 1);
+    std::fill(outgoing_edge_active_.begin(), outgoing_edge_active_.end(), 1);
   }
   template<class ARCHIVE> void serialize_primal(ARCHIVE& ar) { ar( incoming_edge_, outgoing_edge_ ); }
   //template<class ARCHIVE> void serialize_dual(ARCHIVE& ar) { ar( cereal::binary_data( pot_, sizeof(REAL)*size()) ); }
@@ -369,6 +402,7 @@ private:
 
   // primal  
   INDEX incoming_edge_, outgoing_edge_;
+  vector<int> incoming_edge_active_, outgoing_edge_active_; // FIXME: Use bool/char, static_assert fails in vector class...
 
   mutable bool min_incoming_dirty_ = true, min_outgoing_dirty_ = true; 
 };
@@ -902,6 +936,7 @@ public:
       }
   }
 
+  /*
   template<typename RIGHT_FACTOR, typename G2>
   void ReceiveRestrictedMessageFromRight(RIGHT_FACTOR& r, G2& msg)
   { 
@@ -922,6 +957,7 @@ public:
       //send_message_to_left(r,msg); 
     }
   }
+  */
 
   template<typename LEFT_FACTOR, typename G2>
   void send_message_to_right(LEFT_FACTOR& l, G2& msg, const REAL omega)
@@ -944,6 +980,7 @@ public:
       }
   }
 
+  /*
   template<typename LEFT_FACTOR, typename G2>
   void ReceiveRestrictedMessageFromLeft(LEFT_FACTOR& l, G2& msg)
   { 
@@ -960,6 +997,7 @@ public:
       //send_message_to_right(l,msg); 
     }
   }
+  */
 
   // msg dim = 1: update left valid, update right general
   // msg dim = 2: update right valid, update left general
@@ -977,15 +1015,52 @@ public:
   }
 
   template<typename LEFT_FACTOR, typename RIGHT_FACTOR>
+  bool ComputeRightFromLeftPrimal(const LEFT_FACTOR& l, RIGHT_FACTOR& r)
+  {
+    WHERE_AM_I
+    if (l.outgoing_edge_active_[outgoing_edge_index_] == 0 && r.incoming_edge_active_[incoming_edge_index_] == 1) {
+      r.incoming_edge_active_[incoming_edge_index_] = 0;
+      return true;
+    }
+
+    if (l.outgoing_edge_ == outgoing_edge_index_ && r.incoming_edge_ == std::decay_t<decltype(r)>::no_primal_decision) {
+      assert(r.incoming_edge_active_[incoming_edge_index_] == 1);
+      r.incoming_edge_ = incoming_edge_index_;
+      std::fill(r.incoming_edge_active_.begin(), r.incoming_edge_active_.end(), 0);
+      r.incoming_edge_active_[incoming_edge_index_] = 1;
+      return true;
+    }
+
+    return false;
+  }
+
+  template<typename LEFT_FACTOR, typename RIGHT_FACTOR>
+  bool ComputeLeftFromRightPrimal(LEFT_FACTOR& l, const RIGHT_FACTOR& r)
+  {
+    WHERE_AM_I
+    if (r.incoming_edge_active_[incoming_edge_index_] == 0 && l.outgoing_edge_active_[outgoing_edge_index_] == 1) {
+      l.outgoing_edge_active_[outgoing_edge_index_] = 0;
+      return true;
+    }
+
+    if (r.incoming_edge_ == incoming_edge_index_ && l.outgoing_edge_ == std::decay_t<decltype(l)>::no_primal_decision) {
+      assert(l.outgoing_edge_active_[outgoing_edge_index_] == 1);
+      l.outgoing_edge_ = outgoing_edge_index_;
+      std::fill(l.outgoing_edge_active_.begin(), l.outgoing_edge_active_.end(), 0);
+      l.outgoing_edge_active_[outgoing_edge_index_] = 1;
+      return true;
+    }
+
+    return false;
+  }
+
+  template<typename LEFT_FACTOR, typename RIGHT_FACTOR>
   bool CheckPrimalConsistency(const LEFT_FACTOR& l, const RIGHT_FACTOR& r) const
   {
-    if(l.outgoing_edge_ == outgoing_edge_index_) {
-      return r.incoming_edge_ == incoming_edge_index_;
-    }
-    if(r.incoming_edge_ == incoming_edge_index_) {
-      return r.outgoing_edge_ == outgoing_edge_index_;
-    } 
-    return true;
+    if (l.outgoing_edge_ == outgoing_edge_index_ || r.incoming_edge_ == incoming_edge_index_)
+      return l.outgoing_edge_ == outgoing_edge_index_ && r.incoming_edge_ == incoming_edge_index_;
+    else
+      return true;
   }
 
   template<typename SOLVER, typename LEFT_FACTOR, typename RIGHT_FACTOR>

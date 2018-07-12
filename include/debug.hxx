@@ -1,6 +1,11 @@
 #pragma once
+#ifndef LP_MP_CELL_TRACKING_DEBUG_HXX
+#define LP_MP_CELL_TRACKING_DEBUG_HXX
 
 namespace LP_MP {
+
+#define WHERE_AM_I std::cout << "[" << this << "] " << __PRETTY_FUNCTION__ << std::endl;
+#define WHERE_AM_I
 
 template<typename CHECK> struct get_type;
 
@@ -56,3 +61,5 @@ auto print_container(const CONTAINER& c)
 }
 
 } // namespace LP_MP
+
+#endif

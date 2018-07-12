@@ -386,7 +386,7 @@ struct FMC_MY {
   constexpr static const char* name = "My Cell Tracking";
   using FMC = FMC_MY;
 
-  using detection_factor_container = FactorContainer<detection_factor, FMC, 0, false>;
+  using detection_factor_container = FactorContainer<detection_factor, FMC, 0, true>;
   using at_most_one_cell_factor_container = FactorContainer<uniform_minorant_factor, FMC, 1, false>;
   using FactorList = meta::list<
     detection_factor_container,
@@ -414,11 +414,68 @@ auto create_random_cost_functor()
   return [=]() mutable { return uniform(generator); };
 }
 
+void test_transition_normal()
+{
+  auto r = create_random_cost_functor();
+
+  MpRoundingSolver<Solver<LP<FMC_MY>, StandardVisitor>> solver;
+  auto& lp = solver.GetLP();
+  auto& ctor = solver.GetProblemConstructor<0>();
+
+  ctor.set_number_of_timesteps(2);
+  ctor.add_detection_hypothesis(lp, 0, 0, r(), r(), r(), 0, 0, 1, 0);
+  ctor.add_detection_hypothesis(lp, 1, 0, r(), r(), r(), 1, 0, 0, 0);
+  ctor.add_cell_transition(lp, 0, 0, 1, 0, r());
+  ctor.end(lp);
+
+  lp.Begin();
+  lp.set_reparametrization(LPReparametrizationMode::Anisotropic);
+  for (int i = 0; i < 10; ++i) {
+    REAL before_lb = lp.LowerBound();
+    if (i % 2 == 0)
+      lp.ComputeForwardPassAndPrimal(i/2);
+    else
+      lp.ComputeBackwardPassAndPrimal(i/2);
+    REAL after_lb = lp.LowerBound();
+    assert(before_lb <= after_lb + eps);
+    assert(lp.EvaluatePrimal() < std::numeric_limits<REAL>::infinity());
+  }
+}
+
+void test_transition_split()
+{
+  auto r = create_random_cost_functor();
+
+  MpRoundingSolver<Solver<LP<FMC_MY>, StandardVisitor>> solver;
+  auto& lp = solver.GetLP();
+  auto& ctor = solver.GetProblemConstructor<0>();
+
+  ctor.set_number_of_timesteps(2);
+  ctor.add_detection_hypothesis(lp, 0, 0, r(), r(), r(), 0, 0, 0, 1);
+  ctor.add_detection_hypothesis(lp, 1, 0, r(), r(), r(), 0, 1, 0, 0);
+  ctor.add_detection_hypothesis(lp, 1, 1, r(), r(), r(), 0, 1, 0, 0);
+  ctor.add_cell_division(lp, 0, 0, 1, 0, 1, 1, r());
+  ctor.end(lp);
+
+  lp.Begin();
+  lp.set_reparametrization(LPReparametrizationMode::Anisotropic);
+  for (int i = 0; i < 10; ++i) {
+    REAL before_lb = lp.LowerBound();
+    if (i % 2 == 0)
+      lp.ComputeForwardPassAndPrimal(i/2);
+    else
+      lp.ComputeBackwardPassAndPrimal(i/2);
+    REAL after_lb = lp.LowerBound();
+    assert(before_lb <= after_lb + eps);
+    assert(lp.EvaluatePrimal() < std::numeric_limits<REAL>::infinity());
+  }
+}
+
 void test_uniform_minorant()
 {
   auto r = create_random_cost_functor();
 
-  Solver<LP<FMC_MY>, StandardVisitor> solver;
+  MpRoundingSolver<Solver<LP<FMC_MY>, StandardVisitor>> solver;
   auto& lp = solver.GetLP();
   auto& ctor = solver.GetProblemConstructor<0>();
 
@@ -434,87 +491,88 @@ void test_uniform_minorant()
 
   lp.Begin();
   lp.set_reparametrization(LPReparametrizationMode::Anisotropic);
-  for (int i = 0; i < 100; ++i) {
+  for (int i = 0; i < 10; ++i) {
     REAL before_lb = lp.LowerBound();
     if (i % 2 == 0)
-      lp.ComputeForwardPass();
+      lp.ComputeForwardPassAndPrimal(i/2+1);
     else
-      lp.ComputeBackwardPass();
+      lp.ComputeBackwardPassAndPrimal(i/2+1);
     REAL after_lb = lp.LowerBound();
     assert(before_lb <= after_lb + eps);
+    assert(lp.EvaluatePrimal() < std::numeric_limits<REAL>::infinity());
   }
 }
 
-void test_transition_normal()
+void test_interaction()
 {
   auto r = create_random_cost_functor();
 
-  Solver<LP<FMC_MY>, StandardVisitor> solver;
+  MpRoundingSolver<Solver<LP<FMC_MY>, StandardVisitor>> solver;
   auto& lp = solver.GetLP();
   auto& ctor = solver.GetProblemConstructor<0>();
 
   ctor.set_number_of_timesteps(2);
-  ctor.add_detection_hypothesis(lp, 0, 0, r(), r(), r(), 0, 0, 1, 0);
-  ctor.add_detection_hypothesis(lp, 1, 0, r(), r(), r(), 1, 0, 0, 0);
+  ctor.add_detection_hypothesis(lp, 0, 0, r(), r(), r(), 0, 0, 2, 0);
+  ctor.add_detection_hypothesis(lp, 0, 1, r(), r(), r(), 0, 0, 2, 0);
+  ctor.add_detection_hypothesis(lp, 1, 0, r(), r(), r(), 2, 0, 0, 0);
+  ctor.add_detection_hypothesis(lp, 1, 1, r(), r(), r(), 2, 0, 0, 0);
+
   ctor.add_cell_transition(lp, 0, 0, 1, 0, r());
+  ctor.add_cell_transition(lp, 0, 0, 1, 1, r());
+  ctor.add_cell_transition(lp, 0, 1, 1, 0, r());
+  ctor.add_cell_transition(lp, 0, 1, 1, 1, r());
+
+  std::array<std::array<INDEX, 2>, 2> exclusions;
+  exclusions[0] = {0, 0};
+  exclusions[1] = {0, 1};
+  ctor.add_exclusion_constraint(lp, exclusions.begin(), exclusions.end());
+  exclusions[0] = {1, 0};
+  exclusions[1] = {1, 1};
+  ctor.add_exclusion_constraint(lp, exclusions.begin(), exclusions.end());
   ctor.end(lp);
 
   lp.Begin();
   lp.set_reparametrization(LPReparametrizationMode::Anisotropic);
-  for (int i = 0; i < 100; ++i) {
+  for (int i = 0; i < 10; ++i) {
     REAL before_lb = lp.LowerBound();
     if (i % 2 == 0)
-      lp.ComputeForwardPass();
+      lp.ComputeForwardPassAndPrimal(i/2+1);
     else
-      lp.ComputeBackwardPass();
+      lp.ComputeBackwardPassAndPrimal(i/2+1);
     REAL after_lb = lp.LowerBound();
     assert(before_lb <= after_lb + eps);
-  }
-}
-
-void test_transition_split()
-{
-  auto r = create_random_cost_functor();
-
-  Solver<LP<FMC_MY>, StandardVisitor> solver;
-  auto& lp = solver.GetLP();
-  auto& ctor = solver.GetProblemConstructor<0>();
-
-  ctor.set_number_of_timesteps(2);
-  ctor.add_detection_hypothesis(lp, 0, 0, r(), r(), r(), 0, 0, 0, 1);
-  ctor.add_detection_hypothesis(lp, 1, 0, r(), r(), r(), 0, 1, 0, 0);
-  ctor.add_detection_hypothesis(lp, 1, 1, r(), r(), r(), 0, 1, 0, 0);
-  ctor.add_cell_division(lp, 0, 0, 1, 0, 1, 1, r());
-  ctor.end(lp);
-
-  lp.Begin();
-  lp.set_reparametrization(LPReparametrizationMode::Anisotropic);
-  for (int i = 0; i < 100; ++i) {
-    REAL before_lb = lp.LowerBound();
-    if (i % 2 == 0)
-      lp.ComputeForwardPass();
-    else
-      lp.ComputeBackwardPass();
-    REAL after_lb = lp.LowerBound();
-    assert(before_lb <= after_lb + eps);
+    assert(lp.EvaluatePrimal() < std::numeric_limits<REAL>::infinity());
   }
 }
 
 int main(int argc, char** argv)
 {
 #ifndef NDEBUG
+  if constexpr (true) {
+  std::cout << "test_transition_normal " << std::flush;
   for (int i = 0; i < 10000; ++i)
     test_transition_normal();
+  std::cout << "ok." << std::endl;
 
+  std::cout << "test_transition_split " << std::flush;
   for (int i = 0; i < 10000; ++i)
     test_transition_split();
+  std::cout << "ok." << std::endl;
 
+  std::cout << "test_uniform_minorant " << std::flush;
   for (int i = 0; i < 10000; ++i)
     test_uniform_minorant();
+  std::cout << "ok." << std::endl;
+
+  std::cout << "test_interaction " << std::flush;
+  for (int i = 0; i < 10000; ++i)
+    test_interaction();
+  std::cout << "ok." << std::endl;
+  }
 #endif
 
   using BaseSolver = Solver<LP<FMC_MY>, StandardVisitor>;
-  BaseSolver solver(argc, argv);
+  MpRoundingSolver<BaseSolver> solver(argc, argv);
   solver.ReadProblem(cell_tracking_parser_2d::ParseProblem<BaseSolver>);
   auto& lp = solver.GetLP();
 

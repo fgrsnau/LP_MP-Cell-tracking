@@ -87,21 +87,30 @@ public:
   : duals_(no_neighbors, 0)
   { }
 
-  void init_primal() { }
+  void init_primal()
+  {
+    WHERE_AM_I
+    primal_ = std::numeric_limits<decltype(primal_)>::max();
+  }
 
-  REAL LowerBound() const {
+  REAL LowerBound() const
+  {
     return std::min(duals_.min(), 0.0);
   }
 
-  REAL EvaluatePrimal() const {
-    return 0;
+  REAL EvaluatePrimal() const
+  {
+    if (primal_ < duals_.size())
+      return duals_[primal_];
+    else
+      return 0.0;
   }
 
   template<typename ARCHIVE>
-  void serialize_primal(ARCHIVE& a) { }
+  void serialize_primal(ARCHIVE& a) { a(primal_); }
 
   template<typename ARCHIVE>
-  void serialize_dual(ARCHIVE& a) { /* (duals_); */ }
+  void serialize_dual(ARCHIVE& a) { a(duals_); }
 
   auto export_variables() { return std::tie(/* duals_ */); }
 
@@ -113,6 +122,7 @@ public:
 
 protected:
   vector<REAL> duals_;
+  INDEX primal_;
 
   friend class uniform_minorant_message;
 };
@@ -126,14 +136,14 @@ public:
   template<typename LEFT_FACTOR, typename G2>
   void send_message_to_right(LEFT_FACTOR& l, G2& msg, const REAL omega)
   {
-    assert(std::abs(omega - 1) < eps);
+    //assert(std::abs(omega - 1) < eps); // No longer valid.
     msg[0] -= l.min_detection_cost() * omega;
   }
 
   template<typename RIGHT_FACTOR, typename MSG_ARRAY>
   static void SendMessagesToLeft(const RIGHT_FACTOR& r, MSG_ARRAY msg_begin, MSG_ARRAY msg_end, const REAL omega)
   {
-    assert(std::abs(omega - 1) < eps);
+    //assert(std::abs(omega - 1) < eps);
 #ifndef NDEBUG
     size_t count = 0;
     for (auto msg_it = msg_begin; msg_it != msg_end; ++msg_it)
@@ -147,11 +157,11 @@ public:
       lifted[i] = {0, r.duals_[i]};
     lifted.back() = {0, 0};
     auto minorant = uniform_minorant_generic(lifted);
+    assert(minorant.back()[0] == 0 && minorant.back()[1] == 0);
 
     size_t i = 0;
-    for (auto msg_it = msg_begin; msg_it != msg_end; ++msg_it, ++i) {
+    for (auto msg_it = msg_begin; msg_it != msg_end; ++msg_it, ++i)
       (*msg_it)[0] -= (minorant[i][1] - minorant[i][0]) * omega;
-    }
   }
 
   template<typename RIGHT_FACTOR, typename G2>
@@ -171,8 +181,37 @@ public:
   void RepamRight(RIGHT_FACTOR& r, const REAL msg, const INDEX msg_dim)
   {
     assert(msg_dim == 0);
-    assert(index_ >= 0 && index_ < r.duals_.size() - 1);
+    assert(index_ >= 0 && index_ < r.duals_.size());
     r.duals_[index_] += msg;
+  }
+
+  template<typename LEFT_FACTOR, typename RIGHT_FACTOR>
+  bool ComputeRightFromLeftPrimal(const LEFT_FACTOR& l, RIGHT_FACTOR& r)
+  {
+    WHERE_AM_I
+    assert(index_ >= 0 && index_ < r.duals_.size());
+    if (l.detection_active() && r.primal_ >= r.duals_.size()) {
+      r.primal_ = index_;
+      return true;
+    }
+    return false;
+  }
+
+  template<typename LEFT_FACTOR, typename RIGHT_FACTOR>
+  bool ComputeLeftFromRightPrimal(LEFT_FACTOR& l, const RIGHT_FACTOR& r)
+  {
+    WHERE_AM_I
+    if (r.primal_ < r.duals_.size() && r.primal_ != index_) {
+      const auto no_edge_taken = std::decay_t<decltype(l)>::no_edge_taken;
+      if (l.incoming_edge_ != no_edge_taken || l.outgoing_edge_ != no_edge_taken) {
+        l.incoming_edge_ = no_edge_taken;
+        l.outgoing_edge_ = no_edge_taken;
+        std::fill(l.incoming_edge_active_.begin(), l.incoming_edge_active_.end(), 0);
+        std::fill(l.outgoing_edge_active_.begin(), l.outgoing_edge_active_.end(), 0);
+        return true;
+      }
+    }
+    return false;
   }
 
   template<typename SOLVER, typename LEFT_FACTOR, typename RIGHT_FACTOR>
